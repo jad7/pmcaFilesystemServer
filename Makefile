@@ -10,6 +10,8 @@ APK_RELEASE_SIGNED := app/build/outputs/apk/releaseSigned/app-releaseSigned.apk
 PYTHON ?= python3
 CAMERA_BASE_URL ?=
 SYNC_DEST_DIR ?=
+SYNC_CONFIG ?= config/sony_a6000_sync.json
+SYNC_BUNDLE ?= build/sony-a6000-sync.pyz
 PROBE_ARGS ?=
 SYNC_ARGS ?=
 GRADLEW := bash ./gradlew
@@ -17,7 +19,7 @@ GRADLE_ENV := JAVA_HOME="$(JAVA8_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" A
 
 .PHONY: help doctor build build-no-tests test test-unit apk apk-debug apk-release apk-release-signed clean \
 	adb-connect adb-packages adb-install-debug adb-install-release-signed adb-uninstall \
-	adb-reinstall-debug adb-reinstall-release-signed camera-probe camera-sync
+	adb-reinstall-debug adb-reinstall-release-signed camera-probe camera-sync sony-a6000-sync sony-a6000-sync-bundle
 
 help:
 	@printf '%s\n' \
@@ -39,6 +41,8 @@ help:
 		'  make adb-reinstall-release-signed - Uninstall and reinstall the signed release APK' \
 		'  make camera-probe    - Run the live camera probe script' \
 		'  make camera-sync     - Download files from camera into a local directory' \
+		'  make sony-a6000-sync - Sync camera media into Immich using the singleton cursor' \
+		'  make sony-a6000-sync-bundle - Build a single-file zipapp bundle' \
 		'  make clean           - Clean build outputs' \
 		'  make doctor          - Print configured paths'
 
@@ -101,6 +105,18 @@ camera-sync:
 	@[ -n "$(CAMERA_BASE_URL)" ] || { echo 'Set CAMERA_BASE_URL=http://camera-ip:8080'; exit 1; }
 	@[ -n "$(SYNC_DEST_DIR)" ] || { echo 'Set SYNC_DEST_DIR=/path/to/destination'; exit 1; }
 	@$(PYTHON) tools/camera_sync.py --base-url "$(CAMERA_BASE_URL)" --dest-dir "$(SYNC_DEST_DIR)" $(SYNC_ARGS)
+
+sony-a6000-sync:
+	@[ -f "$(SYNC_CONFIG)" ] || { echo 'Set SYNC_CONFIG=config/sony_a6000_sync.json and copy the example config first'; exit 1; }
+	@$(PYTHON) tools/sony_a6000_sync.py --config "$(SYNC_CONFIG)" $(SYNC_ARGS)
+
+sony-a6000-sync-bundle:
+	@rm -rf build/sony-a6000-sync-bundle
+	@mkdir -p build/sony-a6000-sync-bundle
+	@cp tools/camera_client.py build/sony-a6000-sync-bundle/camera_client.py
+	@cp tools/sony_a6000_sync.py build/sony-a6000-sync-bundle/sony_a6000_sync.py
+	@printf '%s\n' 'from sony_a6000_sync import main' 'import sys' 'sys.exit(main())' > build/sony-a6000-sync-bundle/__main__.py
+	@$(PYTHON) -m zipapp build/sony-a6000-sync-bundle -o "$(SYNC_BUNDLE)"
 
 clean:
 	@$(GRADLE_ENV) $(GRADLEW) clean

@@ -43,19 +43,24 @@ class CameraClient(object):
     def download_url(self, path):
         return self.build_url("/api/v1/download", {"path": path})
 
-    def download_to_path(self, path, destination_path):
+    def open_download(self, path, timeout_seconds=None):
         url = self.download_url(path)
         request = urllib.request.Request(url)
+        return self.open_response(request, timeout_seconds=timeout_seconds)
+
+    def download_to_path(self, path, destination_path, timeout_seconds=None):
+        response = self.open_download(path, timeout_seconds=timeout_seconds)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                destination_dir = os.path.dirname(destination_path)
-                if destination_dir and not os.path.isdir(destination_dir):
-                    os.makedirs(destination_dir, exist_ok=True)
-                with open(destination_path, "wb") as output_file:
-                    shutil.copyfileobj(response, output_file, length=1024 * 64)
-                return response.getcode(), None
-        except urllib.error.HTTPError as error:
-            return error.code, error.read().decode("utf-8", "replace")
+            if response.getcode() != 200:
+                return response.getcode(), response.read().decode("utf-8", "replace")
+            destination_dir = os.path.dirname(destination_path)
+            if destination_dir and not os.path.isdir(destination_dir):
+                os.makedirs(destination_dir, exist_ok=True)
+            with open(destination_path, "wb") as output_file:
+                shutil.copyfileobj(response, output_file, length=1024 * 64)
+            return response.getcode(), None
+        finally:
+            response.close()
 
     def request_text(self, method, path, params=None):
         url = self.build_url(path, params)
@@ -64,11 +69,18 @@ class CameraClient(object):
             data=b"" if method.upper() == "POST" else None,
         )
         request.get_method = lambda: method.upper()
+        response = self.open_response(request)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                return response.getcode(), response.read().decode("utf-8", "replace")
+            return response.getcode(), response.read().decode("utf-8", "replace")
+        finally:
+            response.close()
+
+    def open_response(self, request, timeout_seconds=None):
+        timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
         except urllib.error.HTTPError as error:
-            return error.code, error.read().decode("utf-8", "replace")
+            return error
 
     def build_url(self, path, params=None):
         url = self.base_url + path

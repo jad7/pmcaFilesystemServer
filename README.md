@@ -82,6 +82,28 @@ The probe script lives in [tools/live_camera_probe.py](/Users/ikrokhmalyov/Docum
 and uses the reusable HTTP helper in [tools/camera_client.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/camera_client.py).
 The downloader lives in [tools/camera_sync.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/camera_sync.py) and mirrors camera files into a local directory.
 
+For the Immich sync scenario, copy the example config and fill the Immich API
+key in JSON:
+
+```bash
+cp config/sony_a6000_sync.example.json config/sony_a6000_sync.json
+make sony-a6000-sync
+```
+
+The Immich sync client lives in [tools/sony_a6000_sync.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/sony_a6000_sync.py).
+Its config stays in [config/sony_a6000_sync.example.json](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/config/sony_a6000_sync.example.json) until you copy it to `config/sony_a6000_sync.json`.
+By default it syncs media only, meaning images, RAW, and video; set `kind` to `all` in the JSON config if you also want other file types.
+
+If you want one file to copy to the Linux box, build the zipapp bundle:
+
+```bash
+make sony-a6000-sync-bundle
+```
+
+That produces `build/sony-a6000-sync.pyz`. You still keep the JSON config and
+state file outside the bundle, which is where the secret key and sync cursor
+state belong.
+
 For creating a release, set git tag and then upload an *unsigned* APK to GitHub's release page.
 Signed APKs seem to be denied by Sony-PMCA-RE.
 

@@ -1,11 +1,5 @@
 # Project Notes for Agents
 
-## Language
-
-- Talk to the user in Ukrainian.
-- The user reads code and documentation in English.
-- Do not use Russian.
-
 ## Target Device
 
 - This application runs on Sony Alpha cameras through the PlayMemories/OpenMemories environment.
@@ -133,6 +127,22 @@ Recommended behavior:
 
 Do not add sorting or offset pagination to the MVP. The local server should own
 sync ordering, deduplication, and retry logic.
+
+## Local Sync Tooling
+
+- `tools/sony_a6000_sync.py` is the long-running local Immich sync client.
+- `make sony-a6000-sync-bundle` builds `build/sony-a6000-sync.pyz` so the
+  Linux host can copy one runnable file instead of a directory tree.
+- The runtime config lives in `config/sony_a6000_sync.json`, copied from
+  `config/sony_a6000_sync.example.json`.
+- Keep the Immich API key in that JSON config, not in source control.
+  `config/sony_a6000_sync.json` is gitignored for that reason.
+- The monitor loop should stay low-resource: poll `hello.txt`, sleep when the
+  camera is absent, and only start a sync cycle when the camera is reachable.
+- After a successful sync cycle, wait for the camera to disappear before
+  allowing the next cycle.
+- Update sync state only after downloads succeed and the Immich import exits
+  cleanly.
 
 ## Scanner Direction
 
