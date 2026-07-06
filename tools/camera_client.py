@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Small HTTP client for live camera smoke tests."""
 
+import os
+import shutil
 import urllib.parse
-import urllib.request
 import urllib.error
+import urllib.request
 
 
 class CameraClient(object):
@@ -40,6 +42,20 @@ class CameraClient(object):
 
     def download_url(self, path):
         return self.build_url("/api/v1/download", {"path": path})
+
+    def download_to_path(self, path, destination_path):
+        url = self.download_url(path)
+        request = urllib.request.Request(url)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                destination_dir = os.path.dirname(destination_path)
+                if destination_dir and not os.path.isdir(destination_dir):
+                    os.makedirs(destination_dir, exist_ok=True)
+                with open(destination_path, "wb") as output_file:
+                    shutil.copyfileobj(response, output_file, length=1024 * 64)
+                return response.getcode(), None
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode("utf-8", "replace")
 
     def request_text(self, method, path, params=None):
         url = self.build_url(path, params)
@@ -87,3 +103,51 @@ def parse_header_fields(text):
                 fields[key] = value
             return fields
     return {}
+
+
+def parse_cursor_page(text):
+    header = {}
+    entries = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\r\n")
+        if not line:
+            continue
+        if line.startswith("# "):
+            header = parse_header_fields(line)
+            continue
+        if line.startswith("#"):
+            continue
+        columns = line.split("\t")
+        if len(columns) != 4:
+            continue
+        entries.append({
+            "path": unescape_field(columns[0]),
+            "mtime": int(columns[1]),
+            "size": int(columns[2]),
+            "kind": columns[3],
+        })
+    return header, entries
+
+
+def unescape_field(value):
+    result = []
+    i = 0
+    while i < len(value):
+        char = value[i]
+        if char != "\\" or i + 1 >= len(value):
+            result.append(char)
+            i += 1
+            continue
+        next_char = value[i + 1]
+        if next_char == "t":
+            result.append("\t")
+        elif next_char == "n":
+            result.append("\n")
+        elif next_char == "r":
+            result.append("\r")
+        elif next_char == "\\":
+            result.append("\\")
+        else:
+            result.append(next_char)
+        i += 2
+    return "".join(result)

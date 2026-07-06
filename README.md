@@ -74,10 +74,13 @@ For a live smoke test against the camera API, use:
 ```bash
 make camera-probe CAMERA_BASE_URL=http://192.168.12.220:8080
 make camera-probe CAMERA_BASE_URL=http://192.168.12.220:8080 PROBE_ARGS='--hours 24 --kind image --max-pages 3'
+make camera-sync CAMERA_BASE_URL=http://192.168.12.220:8080 SYNC_DEST_DIR=/tmp/pmca-sync
+make camera-sync CAMERA_BASE_URL=http://192.168.12.220:8080 SYNC_DEST_DIR=/tmp/pmca-sync SYNC_ARGS='--hours 24 --overwrite'
 ```
 
 The probe script lives in [tools/live_camera_probe.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/live_camera_probe.py)
 and uses the reusable HTTP helper in [tools/camera_client.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/camera_client.py).
+The downloader lives in [tools/camera_sync.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/camera_sync.py) and mirrors camera files into a local directory.
 
 For creating a release, set git tag and then upload an *unsigned* APK to GitHub's release page.
 Signed APKs seem to be denied by Sony-PMCA-RE.
@@ -157,6 +160,9 @@ capabilities,text,cursor,status,singleton
 
 Creates the single active cursor session. `force=1` replaces an existing live
 session. Supported filters are `modified_after`, `prefix`, `kind`, and `force`.
+If `kind` is omitted, the default set is media only: `image`, `raw`, and
+`video`. `other` is excluded unless explicitly requested.
+If `kind=all`, the cursor should include `other` as well.
 
 Response:
 

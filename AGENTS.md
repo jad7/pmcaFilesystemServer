@@ -83,6 +83,10 @@ Supported query parameters:
 - `kind`: `all`, `image`, `raw`, `video`, or `other`.
 - `force`: if truthy, close the active session first.
 
+If `kind` is omitted, the default cursor contents are media only:
+`image`, `raw`, and `video`. `other` is excluded unless explicitly requested.
+If `kind=all`, the cursor should include `other` as well.
+
 `GET /api/v1/cursor/status.txt` reports current cursor state.
 
 `GET /api/v1/cursor/files.txt` returns bounded metadata pages as `text/plain`.

@@ -52,7 +52,7 @@ paths:
             type: string
         - name: kind
           in: query
-          description: File kind filter.
+          description: File kind filter. If omitted, the cursor defaults to media only: image, raw, and video. Use all to include other files too.
           schema:
             type: string
             enum: [all, image, raw, video, other]

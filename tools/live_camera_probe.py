@@ -13,7 +13,7 @@ from camera_client import parse_key_values
 def build_argument_parser():
     parser = argparse.ArgumentParser(description="Probe the live camera sync API.")
     parser.add_argument("--base-url", required=True, help="Camera base URL, e.g. http://192.168.12.220:8080")
-    parser.add_argument("--kind", choices=["image", "raw", "video", "other"], help="Optional cursor kind filter")
+    parser.add_argument("--kind", choices=["all", "image", "raw", "video", "other"], help="Optional cursor kind filter")
     parser.add_argument("--prefix", help="Optional absolute prefix under the storage root")
     parser.add_argument("--modified-after-ms", type=int, help="Lower bound in epoch milliseconds")
     parser.add_argument("--hours", type=float, default=24.0, help="Default modified-after window in hours when explicit ms is not set")

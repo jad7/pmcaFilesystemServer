@@ -29,7 +29,7 @@ final class CameraFileIndex {
         return MAX_LIMIT;
     }
 
-    public CreateResult createCursor(long modifiedAfter, String prefix, CameraFileKind kind, boolean force) {
+    public CreateResult createCursor(long modifiedAfter, String prefix, CameraFileKind kind, boolean includeOther, boolean force) {
         String normalizedPrefix = normalizePrefix(prefix);
         File scanRoot = resolveScanRoot(normalizedPrefix);
         if (scanRoot == null) {
@@ -46,7 +46,7 @@ final class CameraFileIndex {
                 activeSession.closeNow();
             }
 
-            CursorSession session = new CursorSession(scanRoot, normalizedPrefix, modifiedAfter, kind, SESSION_TTL_MS);
+            CursorSession session = new CursorSession(scanRoot, normalizedPrefix, modifiedAfter, kind, includeOther, SESSION_TTL_MS);
             activeSession = session;
             session.start();
             return new CreateResult(true, session.snapshot());
@@ -207,6 +207,7 @@ final class CameraFileIndex {
         private final String normalizedPrefix;
         private final long modifiedAfter;
         private final CameraFileKind kind;
+        private final boolean includeOther;
         private final long createdAtMillis;
         private final long expiresAtMillis;
         private final Object sessionLock = new Object();
@@ -222,11 +223,12 @@ final class CameraFileIndex {
         private volatile int finalEmittedCount;
         private Thread worker;
 
-        CursorSession(File scanRoot, String normalizedPrefix, long modifiedAfter, CameraFileKind kind, long ttlMs) {
+        CursorSession(File scanRoot, String normalizedPrefix, long modifiedAfter, CameraFileKind kind, boolean includeOther, long ttlMs) {
             this.scanRoot = scanRoot;
             this.normalizedPrefix = normalizedPrefix;
             this.modifiedAfter = modifiedAfter;
             this.kind = kind;
+            this.includeOther = includeOther;
             this.createdAtMillis = System.currentTimeMillis();
             this.expiresAtMillis = this.createdAtMillis + ttlMs;
         }
@@ -412,7 +414,12 @@ final class CameraFileIndex {
             if (normalizedPrefix != null && normalizedPrefix.length() > 0 && !matchesPrefix(path, normalizedPrefix)) {
                 return false;
             }
-            if (kind != null && kind != CameraFileKind.fromPath(path)) {
+            CameraFileKind fileKind = CameraFileKind.fromPath(path);
+            if (kind != null) {
+                if (kind != fileKind) {
+                    return false;
+                }
+            } else if (!includeOther && fileKind == CameraFileKind.OTHER) {
                 return false;
             }
             return true;

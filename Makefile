@@ -9,13 +9,15 @@ APK_DEBUG := app/build/outputs/apk/debug/app-debug.apk
 APK_RELEASE_SIGNED := app/build/outputs/apk/releaseSigned/app-releaseSigned.apk
 PYTHON ?= python3
 CAMERA_BASE_URL ?=
+SYNC_DEST_DIR ?=
 PROBE_ARGS ?=
+SYNC_ARGS ?=
 GRADLEW := bash ./gradlew
 GRADLE_ENV := JAVA_HOME="$(JAVA8_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" ANDROID_HOME="$(ANDROID_SDK_ROOT)"
 
 .PHONY: help doctor build build-no-tests test test-unit apk apk-debug apk-release apk-release-signed clean \
 	adb-connect adb-packages adb-install-debug adb-install-release-signed adb-uninstall \
-	adb-reinstall-debug adb-reinstall-release-signed camera-probe
+	adb-reinstall-debug adb-reinstall-release-signed camera-probe camera-sync
 
 help:
 	@printf '%s\n' \
@@ -36,6 +38,7 @@ help:
 		'  make adb-reinstall-debug - Uninstall and reinstall the debug APK' \
 		'  make adb-reinstall-release-signed - Uninstall and reinstall the signed release APK' \
 		'  make camera-probe    - Run the live camera probe script' \
+		'  make camera-sync     - Download files from camera into a local directory' \
 		'  make clean           - Clean build outputs' \
 		'  make doctor          - Print configured paths'
 
@@ -93,6 +96,11 @@ adb-reinstall-release-signed:
 camera-probe:
 	@[ -n "$(CAMERA_BASE_URL)" ] || { echo 'Set CAMERA_BASE_URL=http://camera-ip:8080'; exit 1; }
 	@$(PYTHON) tools/live_camera_probe.py --base-url "$(CAMERA_BASE_URL)" $(PROBE_ARGS)
+
+camera-sync:
+	@[ -n "$(CAMERA_BASE_URL)" ] || { echo 'Set CAMERA_BASE_URL=http://camera-ip:8080'; exit 1; }
+	@[ -n "$(SYNC_DEST_DIR)" ] || { echo 'Set SYNC_DEST_DIR=/path/to/destination'; exit 1; }
+	@$(PYTHON) tools/camera_sync.py --base-url "$(CAMERA_BASE_URL)" --dest-dir "$(SYNC_DEST_DIR)" $(SYNC_ARGS)
 
 clean:
 	@$(GRADLE_ENV) $(GRADLEW) clean

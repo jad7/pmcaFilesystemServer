@@ -78,17 +78,25 @@ public class HttpServer extends SimpleWebServer {
             return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid modified_after\n");
         }
         String prefix = params.get("prefix");
-        CameraFileKind kind;
-        try {
-            kind = CameraFileKind.fromQuery(params.get("kind"));
-        } catch (IllegalArgumentException e) {
-            return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid kind\n");
+        CameraFileKind kind = null;
+        boolean includeOther = false;
+        String kindValue = params.get("kind");
+        if (kindValue != null && kindValue.length() > 0) {
+            if ("all".equalsIgnoreCase(kindValue)) {
+                includeOther = true;
+            } else {
+                try {
+                    kind = CameraFileKind.fromQuery(kindValue);
+                } catch (IllegalArgumentException e) {
+                    return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid kind\n");
+                }
+            }
         }
         boolean force = isTruthy(params.get("force"));
 
         CameraFileIndex.CreateResult result;
         try {
-            result = CameraFileIndex.getInstance().createCursor(modifiedAfter, prefix, kind, force);
+            result = CameraFileIndex.getInstance().createCursor(modifiedAfter, prefix, kind, includeOther, force);
         } catch (IllegalArgumentException e) {
             return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid prefix\n");
         }
