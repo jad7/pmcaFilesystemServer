@@ -1,0 +1,201 @@
+openapi: 3.1.0
+info:
+  title: pmcaFilesystemServer Sync API
+  version: 1.0.0
+  description: >
+    Small camera-side sync API for Sony OpenMemories / PlayMemories cameras.
+    All machine endpoints return text/plain except file downloads.
+servers:
+  - url: http://{cameraIp}:8080
+    variables:
+      cameraIp:
+        default: 192.168.12.220
+        description: Camera LAN IP address.
+paths:
+  /api/v1/hello.txt:
+    get:
+      summary: Probe the sync API
+      description: >
+        Returns protocol, device, and capability metadata as plain text.
+        The server also accepts /api/v1/hello as an alias.
+      responses:
+        "200":
+          description: Protocol and device metadata.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    protocol,pmca-sync,1
+                    device,Sony,ILCE-6000
+                    limits,100,200
+                    capabilities,text,cursor,status
+  /api/v1/files.txt:
+    get:
+      summary: Fetch a paginated file page
+      description: >
+        Returns one bounded page of file metadata as plain text.
+        The server also accepts /api/v1/files as an alias.
+      parameters:
+        - name: limit
+          in: query
+          description: Requested page size, capped by the server.
+          schema:
+            type: integer
+            minimum: 1
+        - name: cursor
+          in: query
+          description: Opaque continuation token from the previous response.
+          schema:
+            type: string
+        - name: kind
+          in: query
+          description: File kind filter.
+          schema:
+            type: string
+            enum: [all, image, raw, video, other]
+        - name: ext
+          in: query
+          description: Extension filter such as .jpg, .arw, or .mp4.
+          schema:
+            type: string
+        - name: prefix
+          in: query
+          description: Path prefix under the camera storage root.
+          schema:
+            type: string
+        - name: modified_after
+          in: query
+          description: Lower bound in epoch milliseconds.
+          schema:
+            type: integer
+            format: int64
+        - name: order
+          in: query
+          description: Sort order. Only mtime_desc is currently supported.
+          schema:
+            type: string
+            enum: [mtime_desc]
+      responses:
+        "200":
+          description: A paginated metadata page.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    # pmca-sync files v=1 limit=100 count=1 has_more=1 next=opaque-token format=tsv fields=path,mtime,size,kind encoding=backslash
+                    /storage/sdcard0/DCIM/100MSDCF/DSC01234.ARW	1719850000123	24891234	raw
+        "400":
+          description: Invalid query parameter.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                invalidKind:
+                  value: invalid kind
+                invalidCursor:
+                  value: invalid cursor
+  /api/v1/file.txt:
+    get:
+      summary: Fetch metadata for one file
+      description: >
+        Returns one metadata record for a single file. The server also accepts
+        /api/v1/file as an alias.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute file path on the camera.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Metadata for the requested file.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    # pmca-sync file v=1
+                    /storage/sdcard0/DCIM/100MSDCF/DSC01234.ARW	1719850000123	24891234	raw
+        "400":
+          description: Missing required path parameter.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                missingPath:
+                  value: missing path
+        "404":
+          description: The file does not exist on the camera.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                notFound:
+                  value: not found
+  /api/v1/download:
+    get:
+      summary: Stream one file
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute file path on the camera.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File bytes streamed with the camera-detected MIME type.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Missing required path parameter.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                missingPath:
+                  value: missing path
+        "404":
+          description: The file does not exist on the camera.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                notFound:
+                  value: not found
+  /api/v1/status.txt:
+    get:
+      summary: Report coarse camera state
+      description: >
+        Returns non-blocking status information about the camera-side index.
+        The server also accepts /api/v1/status as an alias.
+      responses:
+        "200":
+          description: Current camera-side state.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                ready:
+                  value: |
+                    status,ready
+                    files_indexed,9823
+                    scanning,0
