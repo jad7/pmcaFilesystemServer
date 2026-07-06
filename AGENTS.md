@@ -19,8 +19,9 @@
 
 - `HttpServer` extends NanoHTTPD `SimpleWebServer`.
 - The existing app serves a human HTML root page and then delegates other paths to the file server.
-- `FilesystemScanner` currently performs recursive `File.listFiles()` scans from external storage.
-- The current scanner scans separately for videos, JPEGs, and RAWs, which means repeated full tree walks.
+- `CameraFileIndex` now owns the singleton cursor session for the machine API.
+- `FilesystemScanner` remains only as a compatibility helper for the HTML root page.
+- The HTML view still scans separately for videos, JPEGs, and RAWs, but that path is manual only.
 
 ## Product Goal
 
@@ -43,10 +44,10 @@ The camera should stay dumb and lightweight. The local server owns sync state, d
 - SD cards may contain more than 10,000 files.
 - Most files are already synchronized.
 - Do not return the full file inventory as one large response.
-- Do not require holding the full inventory in memory to serve one request.
-- Prefer bounded pages, simple metadata, and resumable download.
-- Cursor pagination must be stable enough for incremental sync.
-- Cursor tokens should be opaque to clients even if the first implementation encodes simple fields.
+- Do not require holding a long-lived full inventory on disk.
+- Prefer one bounded cursor session, simple metadata, and resumable download.
+- Keep cursor state singleton and explicit.
+- Cursor payloads may be simple on the wire if the contract stays stable.
 - Avoid expensive checksums during listing. Path, mtime, size, and extension are cheap. Content hashes should be optional and requested only for a small selected set if ever needed.
 - Prefer a text line protocol over JSON. It is cheaper to generate on the camera and cheaper to parse incrementally on the Python side.
 
@@ -57,9 +58,11 @@ Use a versioned machine API under `/api/v1`.
 Core endpoints:
 
 - `GET /api/v1/hello.txt`
-- `GET /api/v1/files.txt`
+- `POST /api/v1/cursor/create.txt`
+- `GET /api/v1/cursor/status.txt`
+- `GET /api/v1/cursor/files.txt`
+- `POST /api/v1/cursor/close.txt`
 - `GET /api/v1/file.txt`
-- `GET /api/v1/status.txt`
 - `GET /api/v1/download`
 
 `GET /api/v1/hello.txt` returns device and protocol capabilities as `text/plain`:
@@ -68,25 +71,30 @@ Core endpoints:
 protocol,pmca-sync,1
 device,Sony,ILCE-6000
 limits,100,200
-capabilities,text,cursor,status
+capabilities,text,cursor,status,singleton
 ```
 
-`GET /api/v1/files.txt` returns bounded metadata pages as `text/plain`.
+`POST /api/v1/cursor/create.txt` creates the single active cursor session.
+
+Supported query parameters:
+
+- `modified_after`: epoch milliseconds lower bound.
+- `prefix`: path prefix under the camera storage root.
+- `kind`: `all`, `image`, `raw`, `video`, or `other`.
+- `force`: if truthy, close the active session first.
+
+`GET /api/v1/cursor/status.txt` reports current cursor state.
+
+`GET /api/v1/cursor/files.txt` returns bounded metadata pages as `text/plain`.
 
 Supported query parameters:
 
 - `limit`: requested page size, capped by the server.
-- `cursor`: opaque continuation token from the previous response.
-- `kind`: `all`, `image`, `raw`, `video`, or `other`.
-- `ext`: extension filter such as `.jpg`, `.arw`, `.mp4`.
-- `prefix`: path prefix under the camera storage root.
-- `modified_after`: client-known lower bound in epoch milliseconds.
-- `order`: start with `mtime_desc`.
 
 Response shape:
 
 ```text
-# pmca-sync files v=1 limit=100 count=1 has_more=1 next=opaque-token format=tsv fields=path,mtime,size,kind encoding=backslash
+# pmca-sync cursor v=1 cursor=1 status=ready limit=100 count=1 has_more=1 matched=1 scanned=42 emitted=1 remaining=0 format=tsv fields=path,mtime,size,kind encoding=backslash
 /storage/sdcard0/DCIM/100MSDCF/DSC01234.ARW	1719850000123	24891234	raw
 ```
 
@@ -100,55 +108,35 @@ Only `path` is the identity. Do not include a separate `id`; it is redundant. Do
 
 `GET /api/v1/file.txt?path=...` returns one metadata line for one file. This is useful for revalidation before download.
 
-`GET /api/v1/status.txt` returns coarse camera-side state without forcing a blocking scan:
+`POST /api/v1/cursor/close.txt` closes the active session and frees its memory.
 
-```text
-status,ready
-files_indexed,9823
-scanning,0
-```
+`GET /api/v1/status.txt` may remain as an alias to cursor status for older clients.
 
-For first inventory or full audit, the client can page through `/api/v1/files.txt`. Do not add a separate JSON/NDJSON inventory endpoint unless real hardware proves it is needed.
+The `matched` counter is current while scanning and final once the cursor is
+ready, closed, expired, or errored.
 
-## Pagination Strategy
+## Cursor Strategy
 
-First implementation should use a bounded live scan, not a persistent database.
+The first implementation should use one active bounded cursor session.
 
-Recommended order:
+Recommended behavior:
 
-- Sort by `mtime DESC`, then `path ASC`.
-- Cursor contains the last emitted tuple: `mtime`, `path`, plus the active query filters.
-- The next page returns files where `(mtime, path)` is after that tuple in the same order.
+- `create` starts one background scan for the chosen filter set.
+- The cursor keeps compact arrays of `path`, `mtime`, `size`, and `kind`.
+- `files` pages from that session until exhausted.
+- `close` cancels and releases the session.
+- `force=1` replaces a stale session.
 
-For the Sony camera environment, a full sorted in-memory list of 10K+ entries may be too expensive. Prefer scanning with a bounded heap of the next page:
-
-- Walk the filesystem once per page.
-- Apply cheap filters while walking.
-- Keep only the best `limit + 1` entries for the current cursor window.
-- Return `limit` entries and use the extra entry to compute `has_more`.
-
-This costs I/O per page but bounds memory. It also keeps the camera-side implementation simple and compatible with old Android APIs.
-
-If performance is not good enough, the second step is a small persistent index stored on external storage or app storage. Do not start with SQLite unless the bounded live scan is proven too slow on the camera.
-
-Normal sync should query recent files first:
-
-- The Python client stores the highest imported `mtime`.
-- The next sync calls `/api/v1/files.txt?modified_after=<last_mtime_minus_safety_window>&order=mtime_desc`.
-- The client stops once pages are older than the local sync window or all returned files are already known.
-- The client remains idempotent because camera-side snapshots are not guaranteed.
+Do not add sorting or offset pagination to the MVP. The local server should own
+sync ordering, deduplication, and retry logic.
 
 ## Scanner Direction
 
-Refactor `FilesystemScanner` toward one generic scanner:
+Keep `FilesystemScanner` as a compatibility helper for the HTML page only.
 
-- one traversal implementation
-- one `FileEntry` metadata model
-- one filter object
-- one page result object
-- no separate full scans for JPEG, RAW, and video
-
-Avoid adding Java 8-only APIs. Use iterative traversal with `File[]` and `ArrayList`/`Stack` or `ArrayDeque` if available on target.
+- one traversal implementation is enough for the HTML page
+- no Java 8-only filesystem APIs
+- prefer `java.io.File`, `ArrayDeque`, and simple lists
 
 ## Python Client Responsibilities
 
@@ -156,7 +144,8 @@ The Python/local server should:
 
 - store sync state locally
 - call `/api/v1/hello.txt`
-- query recent files first with `modified_after` from the last successful sync
+- create a cursor for the relevant sync window
+- page through cursor files until complete
 - compare by path, size, and mtime
 - download missing or changed files
 - retry failed downloads

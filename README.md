@@ -38,7 +38,8 @@ Mobile's Hotspot.
 # Development
 
 Copy `.env.template` to `.env` and fill in your local Java 8 and Android SDK
-paths before running the Makefile targets.
+paths before running the Makefile targets. You can also put `ADB_TARGET` and
+`CAMERA_BASE_URL` there if you want default live-test values.
 
 ```bash
 adb tcpip 5555
@@ -46,6 +47,37 @@ adb connect 192.168.178.53:5555
 ```
 
 See https://stackoverflow.com/a/3623727
+
+For live camera work, these are the usual adb commands:
+
+```bash
+adb connect ip:port
+adb install -t app/build/outputs/apk/releaseSigned/app-releaseSigned.apk
+adb shell pm list packages
+adb uninstall info.schnatterer.pmcaFilesystemServer
+```
+
+The same flow is available through Makefile targets:
+
+```bash
+make adb-connect ADB_TARGET=ip:port
+make adb-packages
+make adb-install-debug
+make adb-install-release-signed
+make adb-uninstall
+make adb-reinstall-debug
+make adb-reinstall-release-signed
+```
+
+For a live smoke test against the camera API, use:
+
+```bash
+make camera-probe CAMERA_BASE_URL=http://192.168.12.220:8080
+make camera-probe CAMERA_BASE_URL=http://192.168.12.220:8080 PROBE_ARGS='--hours 24 --kind image --max-pages 3'
+```
+
+The probe script lives in [tools/live_camera_probe.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/live_camera_probe.py)
+and uses the reusable HTTP helper in [tools/camera_client.py](/Users/ikrokhmalyov/Documents/pmcaFilesystemServer/tools/camera_client.py).
 
 For creating a release, set git tag and then upload an *unsigned* APK to GitHub's release page.
 Signed APKs seem to be denied by Sony-PMCA-RE.
@@ -118,27 +150,50 @@ Returns protocol and device capabilities.
 protocol,pmca-sync,1
 device,Sony,ILCE-6000
 limits,100,200
-capabilities,text,cursor,status
+capabilities,text,cursor,status,singleton
 ```
 
-### `GET /api/v1/files.txt`
+### `POST /api/v1/cursor/create.txt?modified_after=...&prefix=...&kind=...&force=1`
 
-Returns one bounded page of file metadata.
-
-Supported query parameters:
-
-* `limit`: requested page size, capped by the server.
-* `cursor`: opaque continuation token returned by the previous response.
-* `kind`: `all`, `image`, `raw`, `video`, or `other`.
-* `ext`: extension filter such as `.jpg`, `.arw`, `.mp4`.
-* `prefix`: path prefix under the camera storage root.
-* `modified_after`: epoch milliseconds lower bound.
-* `order`: initially `mtime_desc`.
+Creates the single active cursor session. `force=1` replaces an existing live
+session. Supported filters are `modified_after`, `prefix`, `kind`, and `force`.
 
 Response:
 
 ```text
-# pmca-sync files v=1 limit=100 count=1 has_more=1 next=opaque-token format=tsv fields=path,mtime,size,kind encoding=backslash
+cursor,1
+status,scanning
+matched,0
+scanned,0
+emitted,0
+remaining,0
+```
+
+The camera scans once, stores compact arrays for the matched files, and pages
+from that session. `matched` is current while scanning and final once the
+cursor becomes ready, closed, expired, or errored.
+
+### `GET /api/v1/cursor/status.txt`
+
+Returns coarse cursor state without forcing a blocking scan.
+
+```text
+cursor,1
+status,ready
+matched,245
+scanned,9823
+emitted,100
+remaining,145
+```
+
+### `GET /api/v1/cursor/files.txt?limit=100`
+
+Returns one bounded page of file metadata from the active cursor session.
+
+Response:
+
+```text
+# pmca-sync cursor v=1 cursor=1 status=ready limit=100 count=1 has_more=1 matched=245 scanned=9823 emitted=100 remaining=145 format=tsv fields=path,mtime,size,kind encoding=backslash
 /storage/sdcard0/DCIM/100MSDCF/DSC01234.ARW	1719850000123	24891234	raw
 ```
 
@@ -161,62 +216,35 @@ revalidate size and modification time before downloading.
 Streams one file. Range support is a later enhancement if interrupted downloads
 need to resume.
 
-### `GET /api/v1/status.txt`
+### `POST /api/v1/cursor/close.txt`
 
-Returns coarse camera-side state without forcing a blocking scan.
-
-```text
-status,ready
-files_indexed,9823
-scanning,0
-```
+Closes the active session and releases the matched arrays.
 
 For first inventory or full audit, the local server can page through
-`/api/v1/files.txt`. Do not add a separate JSON or NDJSON inventory endpoint
-unless real hardware proves it is needed.
+`/api/v1/cursor/files.txt`. Do not add a separate JSON or NDJSON inventory
+endpoint unless real hardware proves it is needed.
 
-## Pagination Plan
+## Cursor Plan
 
-The first implementation should avoid a full in-memory inventory. A practical
-approach is a bounded live scan:
+The first implementation uses one singleton cursor session, not a persistent
+database.
 
-* Traverse storage with old-compatible `java.io.File` APIs.
-* Apply filters while walking.
-* Keep only the best `limit + 1` candidates for the active cursor window.
-* Return `limit` items.
-* Use the extra candidate to compute `has_more`.
+* `create` starts one background scan for the chosen filter set.
+* The cursor keeps compact arrays of `path`, `mtime`, `size`, and `kind`.
+* `files` pages from that session until exhausted.
+* `close` cancels and releases the session.
+* `force=1` replaces a stale session.
 
-The initial stable ordering should be:
+Do not add sorting or offset pagination to the MVP. The local server should
+own sync ordering, deduplication, and retry logic.
 
-* `mtime DESC`
-* `path ASC` as the tie-breaker
+## Scanner Direction
 
-The cursor should encode the last emitted `(mtime, path)` tuple plus the active
-query shape. Clients must treat it as opaque.
+Keep `FilesystemScanner` as a compatibility helper for the HTML page only.
 
-This design trades I/O per page for bounded camera memory. If this is too slow
-on real hardware, the next step is a small persistent file index. Do not start
-with a database unless the bounded scan is proven insufficient on the camera.
-
-Normal sync should query recent files first:
-
-* The local server stores the highest imported `mtime`.
-* The next sync calls `/api/v1/files.txt?modified_after=<last_mtime_minus_safety_window>&order=mtime_desc`.
-* The local server stops when returned pages are older than the sync window or
-  all files in the page are already known.
-* The local server remains idempotent because camera-side snapshots are not
-  guaranteed.
-
-## Scanner Refactoring Direction
-
-The current `FilesystemScanner` performs separate recursive scans for videos,
-JPEGs, and RAW files. The sync API needs a single generic scanner instead:
-
-* one traversal implementation
-* one file metadata model
-* one filter object
-* one page result object
+* one traversal implementation is enough for the HTML page
 * no Java 8-only filesystem APIs
+* prefer `java.io.File`, `ArrayDeque`, and simple lists
 
 The Python/local server should store sync state and compare returned metadata
 against its own database. The camera should only expose metadata and file

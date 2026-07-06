@@ -6,9 +6,10 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.util.List;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 
+import fi.iki.elonen.NanoHTTPD.Method;
 import fi.iki.elonen.SimpleWebServer;
 
 public class HttpServer extends SimpleWebServer {
@@ -19,7 +20,6 @@ public class HttpServer extends SimpleWebServer {
 
     public HttpServer() {
         super(HOST, PORT, new File(WWW_ROOT).getAbsoluteFile(), QUIET);
-        CameraFileIndex.getInstance().primeAsync();
     }
 
     @Override
@@ -31,20 +31,27 @@ public class HttpServer extends SimpleWebServer {
         if ("/api/v1/hello.txt".equals(uri) || "/api/v1/hello".equals(uri)) {
             return serveHello();
         }
-        if ("/api/v1/files.txt".equals(uri) || "/api/v1/files".equals(uri)) {
-            return serveFiles(session);
+        if ("/api/v1/cursor/create.txt".equals(uri) || "/api/v1/cursor/create".equals(uri)) {
+            return serveCursorCreate(session);
+        }
+        if ("/api/v1/cursor/status.txt".equals(uri) || "/api/v1/cursor/status".equals(uri)
+                || "/api/v1/status.txt".equals(uri) || "/api/v1/status".equals(uri)) {
+            return serveCursorStatus();
+        }
+        if ("/api/v1/cursor/files.txt".equals(uri) || "/api/v1/cursor/files".equals(uri)
+                || "/api/v1/files.txt".equals(uri) || "/api/v1/files".equals(uri)) {
+            return serveCursorFiles(session);
+        }
+        if ("/api/v1/cursor/close.txt".equals(uri) || "/api/v1/cursor/close".equals(uri)) {
+            return serveCursorClose(session);
         }
         if ("/api/v1/file.txt".equals(uri) || "/api/v1/file".equals(uri)) {
             return serveFileMeta(session);
         }
-        if ("/api/v1/status.txt".equals(uri) || "/api/v1/status".equals(uri)) {
-            return serveStatus();
-        }
         if ("/api/v1/download".equals(uri)) {
             return serveDownload(session);
-        } else {
-            return super.serve(session);
         }
+        return super.serve(session);
     }
 
     private Response serveHello() {
@@ -54,62 +61,78 @@ public class HttpServer extends SimpleWebServer {
         response.append(escapeLineValue(getDeviceInfo().getModel())).append("\n");
         response.append("limits,").append(CameraFileIndex.getInstance().getDefaultLimit()).append(",");
         response.append(CameraFileIndex.getInstance().getMaxLimit()).append("\n");
-        response.append("capabilities,text,cursor,status\n");
+        response.append("capabilities,text,cursor,status,singleton\n");
         return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, response.toString());
     }
 
-    private Response serveStatus() {
-        CameraFileIndex index = CameraFileIndex.getInstance();
-        StringBuilder response = new StringBuilder();
-        response.append("status,");
-        response.append(index.isLoaded() ? "ready" : (index.isLoading() ? "scanning" : "starting"));
-        response.append("\n");
-        response.append("files_indexed,").append(index.getIndexedCount()).append("\n");
-        response.append("scanning,").append(index.isLoading() ? "1" : "0").append("\n");
-        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, response.toString());
-    }
+    private Response serveCursorCreate(IHTTPSession session) {
+        if (!isPost(session)) {
+            return methodNotAllowed("POST required\n");
+        }
 
-    private Response serveFiles(IHTTPSession session) {
         Map<String, String> params = session.getParms();
-        int limit = parseLimit(params.get("limit"));
-        long modifiedAfter = parseLongOrDefault(params.get("modified_after"), Long.MIN_VALUE);
-        String ext = normalizeExt(decodeValue(params.get("ext")));
-        String prefix = decodeValue(params.get("prefix"));
+        long modifiedAfter;
+        try {
+            modifiedAfter = parseOptionalLong(params.get("modified_after"), Long.MIN_VALUE);
+        } catch (NumberFormatException e) {
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid modified_after\n");
+        }
+        String prefix = params.get("prefix");
         CameraFileKind kind;
         try {
-            kind = CameraFileKind.fromQuery(decodeValue(params.get("kind")));
+            kind = CameraFileKind.fromQuery(params.get("kind"));
         } catch (IllegalArgumentException e) {
             return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid kind\n");
         }
-        CursorToken cursor;
+        boolean force = isTruthy(params.get("force"));
+
+        CameraFileIndex.CreateResult result;
         try {
-            cursor = parseCursor(params.get("cursor"));
+            result = CameraFileIndex.getInstance().createCursor(modifiedAfter, prefix, kind, force);
         } catch (IllegalArgumentException e) {
-            return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid cursor\n");
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "invalid prefix\n");
         }
 
-        CameraFileIndex.PageQuery query = new CameraFileIndex.PageQuery(limit, cursor, kind, ext, prefix, modifiedAfter);
-        CameraFileIndex.PageResult page = CameraFileIndex.getInstance().query(query);
-        StringBuilder response = new StringBuilder();
-        response.append("# pmca-sync files v=1");
-        response.append(" limit=").append(limit);
-        response.append(" count=").append(page.getItems().size());
-        response.append(" has_more=").append(page.hasMore() ? "1" : "0");
-        if (page.getNextCursor() != null) {
-            response.append(" next=").append(page.getNextCursor());
+        CameraFileIndex.CursorSnapshot snapshot = result.getSnapshot();
+        Response.Status status;
+        if (snapshot.getState() == CameraFileIndex.CursorSnapshot.State.ERROR) {
+            status = Response.Status.BAD_REQUEST;
+        } else if (result.isCreated()) {
+            status = Response.Status.ACCEPTED;
+        } else {
+            status = Response.Status.CONFLICT;
         }
-        response.append(" format=tsv fields=path,mtime,size,kind encoding=backslash\n");
-        for (CameraFileEntry entry : page.getItems()) {
-            response.append(escapeField(entry.getPath())).append("\t");
-            response.append(entry.getModifiedAt()).append("\t");
-            response.append(entry.getSize()).append("\t");
-            response.append(entry.getKind().wireName()).append("\n");
+        return newFixedLengthResponse(status, MIME_PLAINTEXT, renderCursorSnapshot(snapshot));
+    }
+
+    private Response serveCursorStatus() {
+        CameraFileIndex.CursorSnapshot snapshot = CameraFileIndex.getInstance().getStatus();
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, renderCursorSnapshot(snapshot));
+    }
+
+    private Response serveCursorFiles(IHTTPSession session) {
+        int limit = parseLimit(session.getParms().get("limit"));
+        CameraFileIndex.CursorPage page = CameraFileIndex.getInstance().getCursorPage(limit);
+        CameraFileIndex.CursorSnapshot snapshot = page.getSnapshot();
+        if (!snapshot.isReady()) {
+            Response.Status status = snapshot.getState() == CameraFileIndex.CursorSnapshot.State.ERROR
+                    ? Response.Status.INTERNAL_ERROR
+                    : Response.Status.CONFLICT;
+            return newFixedLengthResponse(status, MIME_PLAINTEXT, renderCursorSnapshot(snapshot));
         }
-        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, response.toString());
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, renderCursorPage(page, limit));
+    }
+
+    private Response serveCursorClose(IHTTPSession session) {
+        if (!isPost(session)) {
+            return methodNotAllowed("POST required\n");
+        }
+        CameraFileIndex.CursorSnapshot snapshot = CameraFileIndex.getInstance().closeCursor();
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, renderCursorSnapshot(snapshot));
     }
 
     private Response serveFileMeta(IHTTPSession session) {
-        String path = decodeValue(session.getParms().get("path"));
+        String path = session.getParms().get("path");
         if (path == null || path.length() == 0) {
             return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "missing path\n");
         }
@@ -119,15 +142,12 @@ public class HttpServer extends SimpleWebServer {
         }
         StringBuilder response = new StringBuilder();
         response.append("# pmca-sync file v=1\n");
-        response.append(escapeField(entry.getPath())).append("\t");
-        response.append(entry.getModifiedAt()).append("\t");
-        response.append(entry.getSize()).append("\t");
-        response.append(entry.getKind().wireName()).append("\n");
+        appendCursorLine(response, entry.getPath(), entry.getModifiedAt(), entry.getSize(), entry.getKind());
         return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, response.toString());
     }
 
     private Response serveDownload(IHTTPSession session) {
-        String path = decodeValue(session.getParms().get("path"));
+        String path = session.getParms().get("path");
         if (path == null || path.length() == 0) {
             return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "missing path\n");
         }
@@ -219,37 +239,71 @@ public class HttpServer extends SimpleWebServer {
         return limit;
     }
 
-    private long parseLongOrDefault(String value, long defaultValue) {
+    private long parseOptionalLong(String value, long defaultValue) {
         if (value == null || value.length() == 0) {
             return defaultValue;
         }
-        try {
-            return Long.parseLong(value);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
+        return Long.parseLong(value);
     }
 
-    private CursorToken parseCursor(String value) {
-        if (value == null || value.length() == 0) {
-            return null;
+    private boolean isTruthy(String value) {
+        if (value == null) {
+            return false;
         }
-        return CursorToken.decode(value);
+        return "1".equals(value) || "true".equalsIgnoreCase(value) || "yes".equalsIgnoreCase(value) || "on".equalsIgnoreCase(value);
     }
 
-    private String normalizeExt(String value) {
-        if (value == null || value.length() == 0) {
-            return null;
-        }
-        String lower = value.toLowerCase(Locale.US);
-        if (!lower.startsWith(".")) {
-            lower = "." + lower;
-        }
-        return lower;
+    private boolean isPost(IHTTPSession session) {
+        return session.getMethod() == Method.POST;
     }
 
-    private String decodeValue(String value) {
-        return value;
+    private Response methodNotAllowed(String message) {
+        return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, MIME_PLAINTEXT, message);
+    }
+
+    private String renderCursorSnapshot(CameraFileIndex.CursorSnapshot snapshot) {
+        StringBuilder response = new StringBuilder();
+        response.append("cursor,1\n");
+        response.append("status,").append(snapshot.getState().name().toLowerCase(Locale.US)).append("\n");
+        response.append("matched,").append(snapshot.getMatchedCount()).append("\n");
+        response.append("scanned,").append(snapshot.getScannedCount()).append("\n");
+        response.append("emitted,").append(snapshot.getEmittedCount()).append("\n");
+        response.append("remaining,").append(snapshot.getRemainingCount()).append("\n");
+        if (snapshot.getMessage() != null && snapshot.getMessage().length() > 0) {
+            response.append("error,").append(escapeLineValue(snapshot.getMessage())).append("\n");
+        }
+        return response.toString();
+    }
+
+    private String renderCursorPage(CameraFileIndex.CursorPage page, int limit) {
+        CameraFileIndex.CursorSnapshot snapshot = page.getSnapshot();
+        StringBuilder response = new StringBuilder();
+        response.append("# pmca-sync cursor v=1");
+        response.append(" cursor=1");
+        response.append(" status=").append(snapshot.getState().name().toLowerCase(Locale.US));
+        response.append(" limit=").append(limit);
+        response.append(" count=").append(page.getCount());
+        response.append(" has_more=").append(page.hasMore() ? "1" : "0");
+        response.append(" matched=").append(snapshot.getMatchedCount());
+        response.append(" scanned=").append(snapshot.getScannedCount());
+        response.append(" emitted=").append(snapshot.getEmittedCount());
+        response.append(" remaining=").append(snapshot.getRemainingCount());
+        response.append(" format=tsv fields=path,mtime,size,kind encoding=backslash\n");
+        String[] paths = page.getPaths();
+        long[] mtimes = page.getMtimes();
+        long[] sizes = page.getSizes();
+        byte[] kinds = page.getKinds();
+        for (int i = page.getFromIndex(); i < page.getToIndex(); i++) {
+            appendCursorLine(response, paths[i], mtimes[i], sizes[i], CameraFileKind.fromPackedValue(kinds[i]));
+        }
+        return response.toString();
+    }
+
+    private void appendCursorLine(StringBuilder response, String path, long modifiedAt, long size, CameraFileKind kind) {
+        response.append(escapeField(path)).append("\t");
+        response.append(modifiedAt).append("\t");
+        response.append(size).append("\t");
+        response.append(kind.wireName()).append("\n");
     }
 
     private String escapeLineValue(String value) {

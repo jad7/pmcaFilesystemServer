@@ -8,6 +8,8 @@ enum CameraFileKind {
     VIDEO,
     OTHER;
 
+    private static final CameraFileKind[] VALUES = values();
+
     public static CameraFileKind fromPath(String path) {
         String lower = path.toLowerCase(Locale.US);
         if (lower.endsWith(".arw")) {
@@ -39,6 +41,18 @@ enum CameraFileKind {
             return OTHER;
         }
         throw new IllegalArgumentException("unknown kind");
+    }
+
+    public byte toPackedValue() {
+        return (byte) ordinal();
+    }
+
+    public static CameraFileKind fromPackedValue(byte value) {
+        int index = value;
+        if (index < 0 || index >= VALUES.length) {
+            return OTHER;
+        }
+        return VALUES[index];
     }
 
     public String wireName() {

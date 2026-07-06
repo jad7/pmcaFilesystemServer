@@ -31,23 +31,23 @@ paths:
                     protocol,pmca-sync,1
                     device,Sony,ILCE-6000
                     limits,100,200
-                    capabilities,text,cursor,status
-  /api/v1/files.txt:
-    get:
-      summary: Fetch a paginated file page
+                    capabilities,text,cursor,status,singleton
+  /api/v1/cursor/create.txt:
+    post:
+      summary: Create the singleton cursor
       description: >
-        Returns one bounded page of file metadata as plain text.
-        The server also accepts /api/v1/files as an alias.
+        Starts a background scan for the requested filter set. If a session is
+        already active, the server returns 409 unless force=1 is supplied.
       parameters:
-        - name: limit
+        - name: modified_after
           in: query
-          description: Requested page size, capped by the server.
+          description: Lower bound in epoch milliseconds.
           schema:
             type: integer
-            minimum: 1
-        - name: cursor
+            format: int64
+        - name: prefix
           in: query
-          description: Opaque continuation token from the previous response.
+          description: Path prefix under the camera storage root.
           schema:
             type: string
         - name: kind
@@ -56,28 +56,88 @@ paths:
           schema:
             type: string
             enum: [all, image, raw, video, other]
-        - name: ext
+        - name: force
           in: query
-          description: Extension filter such as .jpg, .arw, or .mp4.
+          description: If truthy, replace the active session.
           schema:
             type: string
-        - name: prefix
+      responses:
+        "202":
+          description: Cursor created and scan started.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    cursor,1
+                    status,scanning
+                    matched,0
+                    scanned,0
+                    emitted,0
+                    remaining,0
+        "400":
+          description: Invalid query parameter.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                invalidKind:
+                  value: invalid kind
+                invalidPrefix:
+                  value: invalid prefix
+        "409":
+          description: A session is already active and force was not requested.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                busy:
+                  value: |
+                    cursor,1
+                    status,scanning
+                    matched,42
+                    scanned,98
+                    emitted,0
+                    remaining,42
+  /api/v1/cursor/status.txt:
+    get:
+      summary: Report cursor state
+      description: >
+        Returns non-blocking cursor status as plain text.
+        The server also accepts /api/v1/status as an alias.
+      responses:
+        "200":
+          description: Current cursor state.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    cursor,1
+                    status,ready
+                    matched,245
+                    scanned,9823
+                    emitted,100
+                    remaining,145
+  /api/v1/cursor/files.txt:
+    get:
+      summary: Fetch a paginated cursor page
+      description: >
+        Returns one bounded page of file metadata from the active cursor.
+        The server also accepts /api/v1/files as an alias.
+      parameters:
+        - name: limit
           in: query
-          description: Path prefix under the camera storage root.
-          schema:
-            type: string
-        - name: modified_after
-          in: query
-          description: Lower bound in epoch milliseconds.
+          description: Requested page size, capped by the server.
           schema:
             type: integer
-            format: int64
-        - name: order
-          in: query
-          description: Sort order. Only mtime_desc is currently supported.
-          schema:
-            type: string
-            enum: [mtime_desc]
+            minimum: 1
       responses:
         "200":
           description: A paginated metadata page.
@@ -88,19 +148,61 @@ paths:
               examples:
                 default:
                   value: |
-                    # pmca-sync files v=1 limit=100 count=1 has_more=1 next=opaque-token format=tsv fields=path,mtime,size,kind encoding=backslash
+                    # pmca-sync cursor v=1 cursor=1 status=ready limit=100 count=1 has_more=1 matched=245 scanned=9823 emitted=100 remaining=145 format=tsv fields=path,mtime,size,kind encoding=backslash
                     /storage/sdcard0/DCIM/100MSDCF/DSC01234.ARW	1719850000123	24891234	raw
-        "400":
-          description: Invalid query parameter.
+        "409":
+          description: No ready cursor is available yet.
           content:
             text/plain:
               schema:
                 type: string
               examples:
-                invalidKind:
-                  value: invalid kind
-                invalidCursor:
-                  value: invalid cursor
+                busy:
+                  value: |
+                    cursor,1
+                    status,scanning
+                    matched,42
+                    scanned,98
+                    emitted,0
+                    remaining,42
+        "500":
+          description: Cursor scan failed.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                error:
+                  value: |
+                    cursor,1
+                    status,error
+                    matched,0
+                    scanned,0
+                    emitted,0
+                    remaining,0
+                    error,IllegalStateException
+  /api/v1/cursor/close.txt:
+    post:
+      summary: Close the active cursor
+      description: >
+        Cancels the current cursor session and releases its matched arrays.
+        The server also accepts /api/v1/cursor/close as an alias.
+      responses:
+        "200":
+          description: Cursor closed or already idle.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    cursor,1
+                    status,closed
+                    matched,245
+                    scanned,9823
+                    emitted,100
+                    remaining,145
   /api/v1/file.txt:
     get:
       summary: Fetch metadata for one file
@@ -182,9 +284,9 @@ paths:
                   value: not found
   /api/v1/status.txt:
     get:
-      summary: Report coarse camera state
+      summary: Report coarse cursor state
       description: >
-        Returns non-blocking status information about the camera-side index.
+        Returns non-blocking cursor information about the camera-side index.
         The server also accepts /api/v1/status as an alias.
       responses:
         "200":
@@ -196,6 +298,9 @@ paths:
               examples:
                 ready:
                   value: |
+                    cursor,1
                     status,ready
-                    files_indexed,9823
-                    scanning,0
+                    matched,245
+                    scanned,9823
+                    emitted,100
+                    remaining,145

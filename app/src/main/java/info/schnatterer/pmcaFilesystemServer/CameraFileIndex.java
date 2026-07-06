@@ -3,61 +3,22 @@ package info.schnatterer.pmcaFilesystemServer;
 import android.os.Environment;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 
 final class CameraFileIndex {
     private static final CameraFileIndex INSTANCE = new CameraFileIndex();
     private static final int DEFAULT_LIMIT = 100;
-    private static final int MAX_LIMIT = 200;
-    private static final Comparator<CameraFileEntry> ORDER = new Comparator<CameraFileEntry>() {
-        @Override
-        public int compare(CameraFileEntry left, CameraFileEntry right) {
-            if (left.getModifiedAt() != right.getModifiedAt()) {
-                return left.getModifiedAt() > right.getModifiedAt() ? -1 : 1;
-            }
-            return left.getPath().compareTo(right.getPath());
-        }
-    };
+    private static final int MAX_LIMIT = 500;
+    private static final long SESSION_TTL_MS = 10L * 60L * 1000L;
+    private static final int INITIAL_CAPACITY = 128;
 
-    private volatile boolean loading;
-    private volatile boolean loaded;
-    private List<CameraFileEntry> ordered = Collections.emptyList();
-    private Map<String, CameraFileEntry> byPath = Collections.emptyMap();
+    private final Object lock = new Object();
+    private CursorSession activeSession;
+    private String rootCanonicalPath;
 
     public static CameraFileIndex getInstance() {
         return INSTANCE;
-    }
-
-    public void primeAsync() {
-        if (!beginLoading()) {
-            return;
-        }
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                loadAndPublish();
-            }
-        }, "camera-file-index");
-        thread.setDaemon(true);
-        thread.start();
-    }
-
-    public void ensureLoaded() {
-        if (loaded) {
-            return;
-        }
-        if (beginLoading()) {
-            loadAndPublish();
-            return;
-        }
-        waitForLoaded();
     }
 
     public int getDefaultLimit() {
@@ -68,223 +29,646 @@ final class CameraFileIndex {
         return MAX_LIMIT;
     }
 
-    public long getFileCount() {
-        ensureLoaded();
-        return ordered.size();
-    }
-
-    public boolean isLoaded() {
-        return loaded;
-    }
-
-    public boolean isLoading() {
-        return loading;
-    }
-
-    public long getIndexedCount() {
-        if (!loaded) {
-            return 0L;
+    public CreateResult createCursor(long modifiedAfter, String prefix, CameraFileKind kind, boolean force) {
+        String normalizedPrefix = normalizePrefix(prefix);
+        File scanRoot = resolveScanRoot(normalizedPrefix);
+        if (scanRoot == null) {
+            return new CreateResult(false, CursorSnapshot.error("invalid prefix"));
         }
-        return ordered.size();
+
+        synchronized (lock) {
+            expireIfNeededLocked();
+
+            if (activeSession != null && activeSession.isOpen()) {
+                if (!force) {
+                    return new CreateResult(false, activeSession.snapshot());
+                }
+                activeSession.closeNow();
+            }
+
+            CursorSession session = new CursorSession(scanRoot, normalizedPrefix, modifiedAfter, kind, SESSION_TTL_MS);
+            activeSession = session;
+            session.start();
+            return new CreateResult(true, session.snapshot());
+        }
+    }
+
+    public CursorSnapshot getStatus() {
+        synchronized (lock) {
+            expireIfNeededLocked();
+            if (activeSession == null) {
+                return CursorSnapshot.idle();
+            }
+            return activeSession.snapshot();
+        }
+    }
+
+    public CursorPage getCursorPage(int limit) {
+        synchronized (lock) {
+            expireIfNeededLocked();
+            if (activeSession == null) {
+                return CursorPage.notReady(CursorSnapshot.idle());
+            }
+            return activeSession.page(limit);
+        }
+    }
+
+    public CursorSnapshot closeCursor() {
+        synchronized (lock) {
+            if (activeSession == null) {
+                return CursorSnapshot.closed(0, 0, 0, 0);
+            }
+            activeSession.closeNow();
+            return activeSession.snapshot();
+        }
     }
 
     public CameraFileEntry findByPath(String path) {
-        ensureLoaded();
-        return byPath.get(path);
+        File file = resolveExistingCameraFile(path);
+        if (file == null) {
+            return null;
+        }
+        String absolutePath = file.getAbsolutePath();
+        return new CameraFileEntry(
+                absolutePath,
+                file.lastModified(),
+                file.length(),
+                CameraFileKind.fromPath(absolutePath));
     }
 
-    public PageResult query(PageQuery query) {
-        ensureLoaded();
-        int limit = query.getLimit();
-        ArrayList<CameraFileEntry> items = new ArrayList<CameraFileEntry>(limit);
-        int startIndex = findStartIndex(query.getCursor());
-        for (int i = startIndex; i < ordered.size(); i++) {
-            CameraFileEntry entry = ordered.get(i);
-            if (query.getModifiedAfter() != Long.MIN_VALUE && entry.getModifiedAt() <= query.getModifiedAfter()) {
-                break;
-            }
-            if (!query.matches(entry)) {
-                continue;
-            }
-            items.add(entry);
-            if (items.size() > limit) {
-                break;
-            }
+    private void expireIfNeededLocked() {
+        if (activeSession == null) {
+            return;
         }
-
-        boolean hasMore = items.size() > limit;
-        if (hasMore) {
-            items.remove(items.size() - 1);
+        if (activeSession.isExpired()) {
+            activeSession.expireNow();
         }
-
-        String nextCursor = null;
-        if (!items.isEmpty() && hasMore) {
-            nextCursor = CursorToken.encode(items.get(items.size() - 1));
-        }
-
-        return new PageResult(items, hasMore, nextCursor);
     }
 
-    public List<File> getFilesByKind(CameraFileKind kind) {
-        ensureLoaded();
-        ArrayList<File> files = new ArrayList<File>();
-        for (CameraFileEntry entry : ordered) {
-            if (kind == null || entry.getKind() == kind) {
-                files.add(new File(entry.getPath()));
-            }
+    private File resolveScanRoot(String normalizedPrefix) {
+        File root = getExternalStorageRoot();
+        if (root == null) {
+            return null;
         }
-        return files;
+        if (normalizedPrefix == null || normalizedPrefix.length() == 0) {
+            return root;
+        }
+
+        File candidate = new File(normalizedPrefix);
+        while (candidate != null && (!candidate.exists() || !candidate.isDirectory())) {
+            candidate = candidate.getParentFile();
+        }
+        if (candidate == null) {
+            return root;
+        }
+        String candidateCanonical = canonicalPath(candidate);
+        String rootCanonical = getRootCanonicalPath();
+        if (candidateCanonical != null && rootCanonical != null && isInsideRoot(candidateCanonical, rootCanonical)) {
+            return candidate;
+        }
+        return root;
     }
 
-    private int findStartIndex(CursorToken cursor) {
-        if (cursor == null) {
-            return 0;
+    private String normalizePrefix(String prefix) {
+        if (prefix == null || prefix.length() == 0) {
+            return null;
         }
-        CameraFileEntry probe = new CameraFileEntry(cursor.getPath(), cursor.getModifiedAt(), 0, CameraFileKind.OTHER);
-        int low = 0;
-        int high = ordered.size();
-        while (low < high) {
-            int mid = (low + high) >>> 1;
-            CameraFileEntry midValue = ordered.get(mid);
-            if (ORDER.compare(midValue, probe) <= 0) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
+        File root = getExternalStorageRoot();
+        if (root == null) {
+            throw new IllegalArgumentException("external storage unavailable");
         }
-        return low;
+        String canonical = canonicalPath(new File(prefix));
+        String rootCanonical = getRootCanonicalPath();
+        if (canonical == null || rootCanonical == null || !isInsideRoot(canonical, rootCanonical)) {
+            throw new IllegalArgumentException("invalid prefix");
+        }
+        return canonical;
     }
 
-    private void waitForLoaded() {
-        synchronized (this) {
-            while (!loaded) {
-                try {
-                    wait();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+    private File resolveExistingCameraFile(String path) {
+        if (path == null || path.length() == 0) {
+            return null;
+        }
+        File root = getExternalStorageRoot();
+        if (root == null) {
+            return null;
+        }
+        String canonical = canonicalPath(new File(path));
+        String rootCanonical = getRootCanonicalPath();
+        if (canonical == null || rootCanonical == null || !isInsideRoot(canonical, rootCanonical)) {
+            return null;
+        }
+        File file = new File(canonical);
+        if (!file.exists() || !file.isFile()) {
+            return null;
+        }
+        return file;
+    }
+
+    private File getExternalStorageRoot() {
+        File root = Environment.getExternalStorageDirectory();
+        if (root == null) {
+            return null;
+        }
+        return root.getAbsoluteFile();
+    }
+
+    private String getRootCanonicalPath() {
+        synchronized (lock) {
+            if (rootCanonicalPath != null) {
+                return rootCanonicalPath;
+            }
+            File root = getExternalStorageRoot();
+            if (root == null) {
+                return null;
+            }
+            rootCanonicalPath = canonicalPath(root);
+            return rootCanonicalPath;
+        }
+    }
+
+    private boolean isInsideRoot(String candidateCanonical, String rootCanonical) {
+        if (candidateCanonical.equals(rootCanonical)) {
+            return true;
+        }
+        return candidateCanonical.startsWith(rootCanonical + File.separator);
+    }
+
+    private String canonicalPath(File file) {
+        try {
+            return file.getCanonicalPath();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static final class CursorSession {
+        private final File scanRoot;
+        private final String normalizedPrefix;
+        private final long modifiedAfter;
+        private final CameraFileKind kind;
+        private final long createdAtMillis;
+        private final long expiresAtMillis;
+        private final Object sessionLock = new Object();
+
+        private PackedEntries entries = new PackedEntries();
+        private volatile CursorSnapshot.State state = CursorSnapshot.State.SCANNING;
+        private volatile String message;
+        private volatile boolean cancelled;
+        private volatile int scannedCount;
+        private volatile int emittedCount;
+        private volatile int finalMatchedCount;
+        private volatile int finalScannedCount;
+        private volatile int finalEmittedCount;
+        private Thread worker;
+
+        CursorSession(File scanRoot, String normalizedPrefix, long modifiedAfter, CameraFileKind kind, long ttlMs) {
+            this.scanRoot = scanRoot;
+            this.normalizedPrefix = normalizedPrefix;
+            this.modifiedAfter = modifiedAfter;
+            this.kind = kind;
+            this.createdAtMillis = System.currentTimeMillis();
+            this.expiresAtMillis = this.createdAtMillis + ttlMs;
+        }
+
+        void start() {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    scan();
+                }
+            }, "pmca-cursor-scan");
+            thread.setDaemon(true);
+            worker = thread;
+            thread.start();
+        }
+
+        boolean isOpen() {
+            CursorSnapshot.State current = state;
+            return current == CursorSnapshot.State.SCANNING || current == CursorSnapshot.State.READY;
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() > expiresAtMillis;
+        }
+
+        void expireNow() {
+            synchronized (sessionLock) {
+                if (state == CursorSnapshot.State.CLOSED || state == CursorSnapshot.State.EXPIRED) {
                     return;
                 }
+                cancelled = true;
+                captureFinalCountsLocked();
+                state = CursorSnapshot.State.EXPIRED;
+                releaseEntries();
             }
+            interruptWorker();
         }
-    }
 
-    private boolean beginLoading() {
-        synchronized (this) {
-            if (loaded || loading) {
-                return false;
-            }
-            loading = true;
-            return true;
-        }
-    }
-
-    private void loadAndPublish() {
-        File root = Environment.getExternalStorageDirectory();
-        ArrayList<CameraFileEntry> freshOrdered = new ArrayList<CameraFileEntry>();
-        Map<String, CameraFileEntry> freshByPath = new HashMap<String, CameraFileEntry>();
-
-        if (root != null) {
-            ArrayDeque<File> stack = new ArrayDeque<File>();
-            stack.push(root);
-
-            while (!stack.isEmpty()) {
-                File current = stack.pop();
-                File[] children = current.listFiles();
-                if (children == null) {
-                    continue;
+        void closeNow() {
+            synchronized (sessionLock) {
+                if (state == CursorSnapshot.State.CLOSED) {
+                    return;
                 }
-                for (File child : children) {
-                    if (child.isDirectory()) {
-                        stack.push(child);
+                cancelled = true;
+                captureFinalCountsLocked();
+                state = CursorSnapshot.State.CLOSED;
+                releaseEntries();
+            }
+            interruptWorker();
+        }
+
+        CursorSnapshot snapshot() {
+            synchronized (sessionLock) {
+                int matched = entries.size();
+                int scanned = scannedCount;
+                int emitted = emittedCount;
+                if (state == CursorSnapshot.State.CLOSED || state == CursorSnapshot.State.EXPIRED || state == CursorSnapshot.State.ERROR) {
+                    matched = finalMatchedCount;
+                    scanned = finalScannedCount;
+                    emitted = finalEmittedCount;
+                }
+                return new CursorSnapshot(
+                        state,
+                        matched,
+                        scanned,
+                        emitted,
+                        expiresAtMillis,
+                        message);
+            }
+        }
+
+        CursorPage page(int limit) {
+            synchronized (sessionLock) {
+                if (state != CursorSnapshot.State.READY) {
+                    return CursorPage.notReady(snapshot());
+                }
+
+                int safeLimit = limit;
+                if (safeLimit < 1) {
+                    safeLimit = 1;
+                }
+
+                int fromIndex = emittedCount;
+                int toIndex = fromIndex + safeLimit;
+                if (toIndex > entries.size()) {
+                    toIndex = entries.size();
+                }
+                boolean hasMore = toIndex < entries.size();
+                emittedCount = toIndex;
+                return new CursorPage(
+                        snapshot(),
+                        entries.paths,
+                        entries.mtimes,
+                        entries.sizes,
+                        entries.kinds,
+                        fromIndex,
+                        toIndex,
+                        hasMore);
+            }
+        }
+
+        private void scan() {
+            try {
+                ArrayDeque<File> stack = new ArrayDeque<File>();
+                stack.push(scanRoot);
+
+                while (!stack.isEmpty()) {
+                    if (isCancelled()) {
+                        return;
+                    }
+
+                    File current = stack.pop();
+                    File[] children = current.listFiles();
+                    if (children == null) {
                         continue;
                     }
-                    if (!child.isFile()) {
-                        continue;
+
+                    for (int i = 0; i < children.length; i++) {
+                        if (isCancelled()) {
+                            return;
+                        }
+
+                        File child = children[i];
+                        if (child.isDirectory()) {
+                            stack.push(child);
+                            continue;
+                        }
+                        if (!child.isFile()) {
+                            continue;
+                        }
+
+                        recordScanned();
+                        String path = child.getAbsolutePath();
+                        if (!matches(path, child.lastModified(), child.length())) {
+                            continue;
+                        }
+
+                        recordMatch(path, child.lastModified(), child.length(), CameraFileKind.fromPath(path));
                     }
-                    String path = child.getAbsolutePath();
-                    CameraFileKind kind = CameraFileKind.fromPath(path);
-                    CameraFileEntry entry = new CameraFileEntry(path, child.lastModified(), child.length(), kind);
-                    freshOrdered.add(entry);
-                    freshByPath.put(path, entry);
+                }
+
+                synchronized (sessionLock) {
+                    if (cancelled) {
+                        return;
+                    }
+                    state = CursorSnapshot.State.READY;
+                }
+            } catch (Throwable t) {
+                synchronized (sessionLock) {
+                    if (cancelled) {
+                        return;
+                    }
+                    captureFinalCountsLocked();
+                    state = CursorSnapshot.State.ERROR;
+                    message = t.getClass().getSimpleName();
+                    if (t.getMessage() != null && t.getMessage().length() > 0) {
+                        message = message + ": " + t.getMessage();
+                    }
+                    releaseEntries();
                 }
             }
         }
 
-        Collections.sort(freshOrdered, ORDER);
-
-        synchronized (this) {
-            ordered = freshOrdered;
-            byPath = freshByPath;
-            loaded = true;
-            loading = false;
-            notifyAll();
-        }
-    }
-
-    static final class PageQuery {
-        private final int limit;
-        private final CursorToken cursor;
-        private final CameraFileKind kind;
-        private final String ext;
-        private final String prefix;
-        private final long modifiedAfter;
-
-        PageQuery(int limit, CursorToken cursor, CameraFileKind kind, String ext, String prefix, long modifiedAfter) {
-            this.limit = limit;
-            this.cursor = cursor;
-            this.kind = kind;
-            this.ext = ext;
-            this.prefix = prefix;
-            this.modifiedAfter = modifiedAfter;
+        private void recordScanned() {
+            synchronized (sessionLock) {
+                scannedCount++;
+            }
         }
 
-        int getLimit() {
-            return limit;
+        private void recordMatch(String path, long modifiedAt, long size, CameraFileKind fileKind) {
+            synchronized (sessionLock) {
+                if (cancelled) {
+                    return;
+                }
+                entries.add(path, modifiedAt, size, fileKind);
+            }
         }
 
-        CursorToken getCursor() {
-            return cursor;
-        }
-
-        long getModifiedAfter() {
-            return modifiedAfter;
-        }
-
-        boolean matches(CameraFileEntry entry) {
-            if (kind != null && entry.getKind() != kind) {
+        private boolean matches(String path, long modifiedAt, long size) {
+            if (modifiedAfter != Long.MIN_VALUE && modifiedAt <= modifiedAfter) {
                 return false;
             }
-            if (prefix != null && prefix.length() > 0 && !entry.getPath().startsWith(prefix)) {
+            if (normalizedPrefix != null && normalizedPrefix.length() > 0 && !matchesPrefix(path, normalizedPrefix)) {
                 return false;
             }
-            if (ext != null && ext.length() > 0 && !entry.getPath().toLowerCase(Locale.US).endsWith(ext)) {
+            if (kind != null && kind != CameraFileKind.fromPath(path)) {
                 return false;
             }
             return true;
         }
+
+        private boolean matchesPrefix(String path, String prefix) {
+            if (path.equals(prefix)) {
+                return true;
+            }
+            if (!path.startsWith(prefix)) {
+                return false;
+            }
+            int prefixLength = prefix.length();
+            if (path.length() <= prefixLength) {
+                return false;
+            }
+            return path.charAt(prefixLength) == File.separatorChar;
+        }
+
+        private boolean isCancelled() {
+            return cancelled || isExpired();
+        }
+
+        private void releaseEntries() {
+            entries.clear();
+        }
+
+        private void captureFinalCountsLocked() {
+            finalMatchedCount = entries.size();
+            finalScannedCount = scannedCount;
+            finalEmittedCount = emittedCount;
+        }
+
+        private void interruptWorker() {
+            Thread currentWorker = worker;
+            if (currentWorker != null) {
+                currentWorker.interrupt();
+            }
+        }
     }
 
-    static final class PageResult {
-        private final List<CameraFileEntry> items;
+    static final class CreateResult {
+        private final boolean created;
+        private final CursorSnapshot snapshot;
+
+        CreateResult(boolean created, CursorSnapshot snapshot) {
+            this.created = created;
+            this.snapshot = snapshot;
+        }
+
+        public boolean isCreated() {
+            return created;
+        }
+
+        public CursorSnapshot getSnapshot() {
+            return snapshot;
+        }
+    }
+
+    static final class CursorSnapshot {
+        enum State {
+            IDLE,
+            SCANNING,
+            READY,
+            CLOSED,
+            EXPIRED,
+            ERROR
+        }
+
+        private final State state;
+        private final int matchedCount;
+        private final int scannedCount;
+        private final int emittedCount;
+        private final long expiresAtMillis;
+        private final String message;
+
+        CursorSnapshot(State state, int matchedCount, int scannedCount, int emittedCount, long expiresAtMillis, String message) {
+            this.state = state;
+            this.matchedCount = matchedCount;
+            this.scannedCount = scannedCount;
+            this.emittedCount = emittedCount;
+            this.expiresAtMillis = expiresAtMillis;
+            this.message = message;
+        }
+
+        static CursorSnapshot idle() {
+            return new CursorSnapshot(State.IDLE, 0, 0, 0, 0L, null);
+        }
+
+        static CursorSnapshot closed(int matchedCount, int scannedCount, int emittedCount, long expiresAtMillis) {
+            return new CursorSnapshot(State.CLOSED, matchedCount, scannedCount, emittedCount, expiresAtMillis, null);
+        }
+
+        static CursorSnapshot error(String message) {
+            return new CursorSnapshot(State.ERROR, 0, 0, 0, 0L, message);
+        }
+
+        public State getState() {
+            return state;
+        }
+
+        public int getMatchedCount() {
+            return matchedCount;
+        }
+
+        public int getScannedCount() {
+            return scannedCount;
+        }
+
+        public int getEmittedCount() {
+            return emittedCount;
+        }
+
+        public int getRemainingCount() {
+            int remaining = matchedCount - emittedCount;
+            if (remaining < 0) {
+                return 0;
+            }
+            return remaining;
+        }
+
+        public long getExpiresAtMillis() {
+            return expiresAtMillis;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public boolean isReady() {
+            return state == State.READY;
+        }
+
+        public boolean isOpen() {
+            return state == State.SCANNING || state == State.READY;
+        }
+    }
+
+    static final class CursorPage {
+        private final CursorSnapshot snapshot;
+        private final String[] paths;
+        private final long[] mtimes;
+        private final long[] sizes;
+        private final byte[] kinds;
+        private final int fromIndex;
+        private final int toIndex;
         private final boolean hasMore;
-        private final String nextCursor;
 
-        PageResult(List<CameraFileEntry> items, boolean hasMore, String nextCursor) {
-            this.items = items;
+        CursorPage(CursorSnapshot snapshot, String[] paths, long[] mtimes, long[] sizes, byte[] kinds, int fromIndex, int toIndex, boolean hasMore) {
+            this.snapshot = snapshot;
+            this.paths = paths;
+            this.mtimes = mtimes;
+            this.sizes = sizes;
+            this.kinds = kinds;
+            this.fromIndex = fromIndex;
+            this.toIndex = toIndex;
             this.hasMore = hasMore;
-            this.nextCursor = nextCursor;
         }
 
-        public List<CameraFileEntry> getItems() {
-            return items;
+        static CursorPage notReady(CursorSnapshot snapshot) {
+            return new CursorPage(snapshot, new String[0], new long[0], new long[0], new byte[0], 0, 0, false);
+        }
+
+        public CursorSnapshot getSnapshot() {
+            return snapshot;
+        }
+
+        public String[] getPaths() {
+            return paths;
+        }
+
+        public long[] getMtimes() {
+            return mtimes;
+        }
+
+        public long[] getSizes() {
+            return sizes;
+        }
+
+        public byte[] getKinds() {
+            return kinds;
+        }
+
+        public int getFromIndex() {
+            return fromIndex;
+        }
+
+        public int getToIndex() {
+            return toIndex;
+        }
+
+        public int getCount() {
+            return toIndex - fromIndex;
         }
 
         public boolean hasMore() {
             return hasMore;
         }
+    }
 
-        public String getNextCursor() {
-            return nextCursor;
+    private static final class PackedEntries {
+        private String[] paths = new String[INITIAL_CAPACITY];
+        private long[] mtimes = new long[INITIAL_CAPACITY];
+        private long[] sizes = new long[INITIAL_CAPACITY];
+        private byte[] kinds = new byte[INITIAL_CAPACITY];
+        private int size;
+
+        void add(String path, long modifiedAt, long size, CameraFileKind kind) {
+            ensureCapacity(this.size + 1);
+            paths[this.size] = path;
+            mtimes[this.size] = modifiedAt;
+            sizes[this.size] = size;
+            kinds[this.size] = kind.toPackedValue();
+            this.size++;
+        }
+
+        int size() {
+            return size;
+        }
+
+        void clear() {
+            paths = new String[0];
+            mtimes = new long[0];
+            sizes = new long[0];
+            kinds = new byte[0];
+            size = 0;
+        }
+
+        private void ensureCapacity(int minCapacity) {
+            if (paths.length >= minCapacity) {
+                return;
+            }
+            int newCapacity = paths.length * 2;
+            if (newCapacity < minCapacity) {
+                newCapacity = minCapacity;
+            }
+            if (newCapacity < INITIAL_CAPACITY) {
+                newCapacity = INITIAL_CAPACITY;
+            }
+
+            String[] freshPaths = new String[newCapacity];
+            long[] freshMtimes = new long[newCapacity];
+            long[] freshSizes = new long[newCapacity];
+            byte[] freshKinds = new byte[newCapacity];
+
+            for (int i = 0; i < size; i++) {
+                freshPaths[i] = paths[i];
+                freshMtimes[i] = mtimes[i];
+                freshSizes[i] = sizes[i];
+                freshKinds[i] = kinds[i];
+            }
+
+            paths = freshPaths;
+            mtimes = freshMtimes;
+            sizes = freshSizes;
+            kinds = freshKinds;
         }
     }
 }
