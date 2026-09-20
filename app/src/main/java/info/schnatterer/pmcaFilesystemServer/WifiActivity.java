@@ -15,19 +15,32 @@ import android.widget.TextView;
 import java.io.IOException;
 
 public class WifiActivity extends BaseActivity {
-    private TextView textView;
+    private TextView statusView;
+    private TextView logView;
     private WifiManager wifiManager;
     private BroadcastReceiver wifiStateReceiver;
     private BroadcastReceiver supplicantStateReceiver;
     private BroadcastReceiver networkStateReceiver;
     private HttpServer httpServer;
+    private final SyncStatus.Listener statusListener = new SyncStatus.Listener() {
+        @Override
+        public void onStatusChanged(final SyncStatus.StatusSnapshot snapshot) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    renderStatus(snapshot.getMessage());
+                }
+            });
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.log);
 
-        textView = (TextView) findViewById(R.id.logView);
+        statusView = (TextView) findViewById(R.id.statusView);
+        logView = (TextView) findViewById(R.id.logView);
 
         wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
 
@@ -53,11 +66,15 @@ public class WifiActivity extends BaseActivity {
         };
 
         httpServer = new HttpServer();
+        renderStatus(SyncStatus.getInstance().getSnapshot().getMessage());
     }
 
     @Override
-    protected void onResume() {
-        super.onResume();
+    protected void onStart() {
+        super.onStart();
+        Logger.info("WifiActivity onStart: starting server");
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        SyncStatus.getInstance().registerListener(statusListener);
         registerReceiver(wifiStateReceiver, new IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION));
         registerReceiver(supplicantStateReceiver, new IntentFilter(WifiManager.SUPPLICANT_STATE_CHANGED_ACTION));
         registerReceiver(networkStateReceiver, new IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION));
@@ -71,14 +88,22 @@ public class WifiActivity extends BaseActivity {
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
+    protected void onStop() {
+        Logger.info("WifiActivity onStop: stopping server");
+        SyncStatus.getInstance().unregisterListener(statusListener);
         unregisterReceiver(wifiStateReceiver);
         unregisterReceiver(supplicantStateReceiver);
         unregisterReceiver(networkStateReceiver);
         wifiManager.setWifiEnabled(false);
         httpServer.stop();
         setAutoPowerOffMode(true);
+        super.onStop();
+    }
+
+    @Override
+    protected void onPause() {
+        Logger.info("WifiActivity onPause: server remains running until onStop");
+        super.onPause();
     }
 
     @Override
@@ -130,6 +155,18 @@ public class WifiActivity extends BaseActivity {
     }
 
     protected void log(String msg) {
-        textView.setText(msg);
+        if (logView != null) {
+            if (logView.length() > 2000) {
+                logView.setText("");
+            }
+            logView.append(msg + "\n");
+        }
+        Logger.info(msg);
+    }
+
+    private void renderStatus(String msg) {
+        if (statusView != null) {
+            statusView.setText(msg);
+        }
     }
 }

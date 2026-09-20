@@ -4,9 +4,9 @@
   "camera_base_url": "http://127.0.0.1:8080",
   "immich_api_url": "http://127.0.0.1:2283/api",
   "immich_api_key": "replace-me",
-  "state_file": "/srv/dev-disk-by-uuid-6988fa30-93b6-4520-bc3b-0474d42efa15/immich/sony-a6000-sync-state.json",
-  "temp_root": "/srv/dev-disk-by-uuid-6988fa30-93b6-4520-bc3b-0474d42efa15/immich/import/sony-a6000",
-  "prefix": "/storage/sdcard0/DCIM",
+  "state_file": "/srv/immich/sony-a6000-sync-state.json",
+  "database_file": "/srv/immich/sony-a6000-sync.sqlite3",
+  "temp_root": "/srv/immich/import/sony-a6000",
   "kind": "media",
   "page_limit": 100,
   "safety_window_seconds": 600,
@@ -17,8 +17,8 @@
   "disconnect_failure_threshold": 3,
   "idle_poll_seconds": 30,
   "failure_retry_seconds": 15,
-  "camera_strip_prefix": "/storage/sdcard0",
   "initial_last_synced": "2026-06-01T00:00:00-07:00",
+  "batch_size": 20,
   "immich_cli_image": "ghcr.io/immich-app/immich-cli:latest",
-  "immich_upload_args": ["upload", "--recursive", "/import"]
+  "immich_upload_args": ["upload", "--recursive", "{import_path}"]
 }

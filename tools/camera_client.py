@@ -37,14 +37,20 @@ class CameraClient(object):
     def cursor_close(self):
         return self.request_text("POST", "/api/v1/cursor/close.txt")
 
+    def ui_status(self, message):
+        return self.request_text("POST", "/api/v1/ui-status.txt", {"message": message})
+
     def file_info(self, path):
         return self.request_text("GET", "/api/v1/file.txt", {"path": path})
 
     def download_url(self, path):
         return self.build_url("/api/v1/download", {"path": path})
 
-    def open_download(self, path, timeout_seconds=None):
-        url = self.download_url(path)
+    def open_download(self, path, timeout_seconds=None, file_index=None, total_files=None):
+        params = {"path": path}
+        if file_index is not None and total_files is not None:
+            params.update(index=str(file_index), total=str(total_files))
+        url = self.build_url("/api/v1/download", params)
         request = urllib.request.Request(url)
         return self.open_response(request, timeout_seconds=timeout_seconds)
 

@@ -3,6 +3,7 @@ package info.schnatterer.pmcaFilesystemServer;
 import com.github.ma1co.openmemories.framework.DeviceInfo;
 
 import java.io.File;
+import java.io.BufferedInputStream;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.util.List;
@@ -44,6 +45,9 @@ public class HttpServer extends SimpleWebServer {
         }
         if ("/api/v1/cursor/close.txt".equals(uri) || "/api/v1/cursor/close".equals(uri)) {
             return serveCursorClose(session);
+        }
+        if ("/api/v1/ui-status.txt".equals(uri) || "/api/v1/ui-status".equals(uri)) {
+            return serveUiStatus(session);
         }
         if ("/api/v1/file.txt".equals(uri) || "/api/v1/file".equals(uri)) {
             return serveFileMeta(session);
@@ -110,6 +114,7 @@ public class HttpServer extends SimpleWebServer {
         } else {
             status = Response.Status.CONFLICT;
         }
+        SyncStatus.getInstance().setMessage(renderUiMessage("cursor", snapshot));
         return newFixedLengthResponse(status, MIME_PLAINTEXT, renderCursorSnapshot(snapshot));
     }
 
@@ -137,6 +142,17 @@ public class HttpServer extends SimpleWebServer {
         }
         CameraFileIndex.CursorSnapshot snapshot = CameraFileIndex.getInstance().closeCursor();
         return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, renderCursorSnapshot(snapshot));
+    }
+
+    private Response serveUiStatus(IHTTPSession session) {
+        if (isPost(session)) {
+            String message = session.getParms().get("message");
+            if (message == null || message.length() == 0) {
+                return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "missing message\n");
+            }
+            SyncStatus.getInstance().setMessage(message);
+        }
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, renderUiStatus());
     }
 
     private Response serveFileMeta(IHTTPSession session) {
@@ -168,10 +184,21 @@ public class HttpServer extends SimpleWebServer {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found\n");
         }
         try {
+            String title = file.getName();
+            try {
+                int index = Integer.parseInt(session.getParms().get("index"));
+                int total = Integer.parseInt(session.getParms().get("total"));
+                if (index > 0 && total >= index) {
+                    title = index + " / " + total + "\n" + title;
+                }
+            } catch (NumberFormatException ignored) {
+                // Older clients do not provide progress context.
+            }
             return newFixedLengthResponse(
                     Response.Status.OK,
                     getMimeTypeForFile(path),
-                    new FileInputStream(file),
+                    new TransferInputStream(new BufferedInputStream(new FileInputStream(file), 65536),
+                            title, file.length()),
                     file.length());
         } catch (FileNotFoundException e) {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found\n");
@@ -280,6 +307,28 @@ public class HttpServer extends SimpleWebServer {
         if (snapshot.getMessage() != null && snapshot.getMessage().length() > 0) {
             response.append("error,").append(escapeLineValue(snapshot.getMessage())).append("\n");
         }
+        return response.toString();
+    }
+
+    private String renderUiMessage(String prefix, CameraFileIndex.CursorSnapshot snapshot) {
+        StringBuilder response = new StringBuilder();
+        response.append(prefix).append(" ");
+        response.append(snapshot.getState().name().toLowerCase(Locale.US));
+        response.append(" matched=").append(snapshot.getMatchedCount());
+        response.append(" scanned=").append(snapshot.getScannedCount());
+        response.append(" emitted=").append(snapshot.getEmittedCount());
+        response.append(" remaining=").append(snapshot.getRemainingCount());
+        if (snapshot.getMessage() != null && snapshot.getMessage().length() > 0) {
+            response.append(" error=").append(snapshot.getMessage());
+        }
+        return response.toString();
+    }
+
+    private String renderUiStatus() {
+        SyncStatus.StatusSnapshot snapshot = SyncStatus.getInstance().getSnapshot();
+        StringBuilder response = new StringBuilder();
+        response.append("message,").append(escapeLineValue(snapshot.getMessage())).append("\n");
+        response.append("updated_at,").append(snapshot.getUpdatedAtMillis()).append("\n");
         return response.toString();
     }
 

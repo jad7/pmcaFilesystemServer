@@ -114,9 +114,22 @@ sony-a6000-sync-bundle:
 	@rm -rf build/sony-a6000-sync-bundle
 	@mkdir -p build/sony-a6000-sync-bundle
 	@cp tools/camera_client.py build/sony-a6000-sync-bundle/camera_client.py
+	@cp tools/sync_store.py build/sony-a6000-sync-bundle/sync_store.py
 	@cp tools/sony_a6000_sync.py build/sony-a6000-sync-bundle/sony_a6000_sync.py
 	@printf '%s\n' 'from sony_a6000_sync import main' 'import sys' 'sys.exit(main())' > build/sony-a6000-sync-bundle/__main__.py
 	@$(PYTHON) -m zipapp build/sony-a6000-sync-bundle -o "$(SYNC_BUNDLE)"
 
 clean:
 	@$(GRADLE_ENV) $(GRADLEW) clean
+
+.PHONY: test-sync test-transfer
+test-sync:
+	@PYTHONPATH=tools $(PYTHON) -m unittest discover -s tests -v
+
+test-transfer:
+	@mkdir -p build/transfer-tests
+	@"$(JAVA8_HOME)/bin/javac" -d build/transfer-tests \
+		app/src/main/java/info/schnatterer/pmcaFilesystemServer/SyncStatus.java \
+		app/src/main/java/info/schnatterer/pmcaFilesystemServer/TransferInputStream.java \
+		tests/java/TransferInputStreamTest.java
+	@"$(JAVA8_HOME)/bin/java" -cp build/transfer-tests info.schnatterer.pmcaFilesystemServer.TransferInputStreamTest

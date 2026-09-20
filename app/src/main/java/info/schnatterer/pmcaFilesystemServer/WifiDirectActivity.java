@@ -18,7 +18,8 @@ import java.util.List;
 public class WifiDirectActivity extends BaseActivity {
     public static final String MY_IP_ADDRESS = "192.168.122.1";
 
-    private TextView textView;
+    private TextView statusView;
+    private TextView logView;
     private WifiManager wifiManager;
     private DirectManager wifiDirectManager;
     private BroadcastReceiver wifiStateReceiver;
@@ -28,6 +29,17 @@ public class WifiDirectActivity extends BaseActivity {
     private BroadcastReceiver stationConnectedReceiver;
     private BroadcastReceiver stationDisconnectedReceiver;
     private HttpServer httpServer;
+    private final SyncStatus.Listener statusListener = new SyncStatus.Listener() {
+        @Override
+        public void onStatusChanged(final SyncStatus.StatusSnapshot snapshot) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    renderStatus(snapshot.getMessage());
+                }
+            });
+        }
+    };
 
     @Override
     // This seems to be a sony-specific value
@@ -36,7 +48,8 @@ public class WifiDirectActivity extends BaseActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.log);
 
-        textView = (TextView) findViewById(R.id.logView);
+        statusView = (TextView) findViewById(R.id.statusView);
+        logView = (TextView) findViewById(R.id.logView);
 
         wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
         wifiDirectManager = (DirectManager) getApplicationContext().getSystemService(DirectManager.WIFI_DIRECT_SERVICE);
@@ -84,11 +97,15 @@ public class WifiDirectActivity extends BaseActivity {
         };
 
         httpServer = new HttpServer();
+        renderStatus(SyncStatus.getInstance().getSnapshot().getMessage());
     }
 
     @Override
-    protected void onResume() {
-        super.onResume();
+    protected void onStart() {
+        super.onStart();
+        Logger.info("WifiDirectActivity onStart: starting server");
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        SyncStatus.getInstance().registerListener(statusListener);
         registerReceiver(wifiStateReceiver, new IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION));
         registerReceiver(wifiDirectStateReceiver, new IntentFilter(DirectManager.DIRECT_STATE_CHANGED_ACTION));
         registerReceiver(groupCreateSuccessReceiver, new IntentFilter(DirectManager.GROUP_CREATE_SUCCESS_ACTION));
@@ -106,8 +123,9 @@ public class WifiDirectActivity extends BaseActivity {
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
+    protected void onStop() {
+        Logger.info("WifiDirectActivity onStop: stopping server");
+        SyncStatus.getInstance().unregisterListener(statusListener);
         unregisterReceiver(wifiStateReceiver);
         unregisterReceiver(wifiDirectStateReceiver);
         unregisterReceiver(groupCreateSuccessReceiver);
@@ -118,6 +136,13 @@ public class WifiDirectActivity extends BaseActivity {
         wifiManager.setWifiEnabled(false);
         httpServer.stop();
         setAutoPowerOffMode(true);
+        super.onStop();
+    }
+
+    @Override
+    protected void onPause() {
+        Logger.info("WifiDirectActivity onPause: server remains running until onStop");
+        super.onPause();
     }
 
     protected void wifiStateChanged(int state) {
@@ -173,6 +198,18 @@ public class WifiDirectActivity extends BaseActivity {
     }
 
     protected void log(String msg) {
-        textView.append(msg + "\n");
+        if (logView != null) {
+            if (logView.length() > 2000) {
+                logView.setText("");
+            }
+            logView.append(msg + "\n");
+        }
+        Logger.info(msg);
+    }
+
+    private void renderStatus(String msg) {
+        if (statusView != null) {
+            statusView.setText(msg);
+        }
     }
 }

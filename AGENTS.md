@@ -56,6 +56,7 @@ Core endpoints:
 - `GET /api/v1/cursor/status.txt`
 - `GET /api/v1/cursor/files.txt`
 - `POST /api/v1/cursor/close.txt`
+- `GET /api/v1/ui-status.txt`
 - `GET /api/v1/file.txt`
 - `GET /api/v1/download`
 
@@ -108,6 +109,10 @@ Only `path` is the identity. Do not include a separate `id`; it is redundant. Do
 
 `POST /api/v1/cursor/close.txt` closes the active session and frees its memory.
 
+`GET /api/v1/ui-status.txt` returns the current human-readable status shown on
+the camera screen. The Python sync client may also post a `message=...` field
+here to surface sync progress back on the camera.
+
 `GET /api/v1/status.txt` may remain as an alias to cursor status for older clients.
 
 The `matched` counter is current while scanning and final once the cursor is
@@ -137,12 +142,35 @@ sync ordering, deduplication, and retry logic.
   `config/sony_a6000_sync.example.json`.
 - Keep the Immich API key in that JSON config, not in source control.
   `config/sony_a6000_sync.json` is gitignored for that reason.
+- Do not require a `prefix` or `camera_strip_prefix` in the local config.
+  The Python sync client should consume the absolute camera paths it receives
+  and derive safe local paths itself.
+- Store the local per-file queue in SQLite and process small sequential batches.
+  The default batch size is 20 files.
+- Upload each flat batch directly to the Immich library without album creation.
+  Do not group staging by year.
+- Delete a staged file only after its Immich upload succeeds and SQLite records
+  the imported status. Retry cleanup after restart; cleanup failure must not
+  trigger a second import.
 - The monitor loop should stay low-resource: poll `hello.txt`, sleep when the
   camera is absent, and only start a sync cycle when the camera is reachable.
 - After a successful sync cycle, wait for the camera to disappear before
   allowing the next cycle.
-- Update sync state only after downloads succeed and the Immich import exits
-  cleanly.
+- Migrate the old JSON timestamp into SQLite on the first new-client startup;
+  thereafter SQLite is the only writable sync state.
+- Import downloaded batches before downloading the next batch. Recover local
+  downloaded files and cleanup before waiting for the camera.
+- Fetch and validate all metadata pages on the Linux host, then close the cursor
+  before downloading. Downloads may outlast the camera's ten-minute cursor TTL.
+- Do not retry cursor page requests: each successful request advances the server
+  offset even if the client loses the response.
+- Download requests may include `index` and `total` for the camera display.
+  `TransferInputStream` reports locally throttled bytes/s without extra HTTP
+  progress polling. Client logs report received bytes and every completed file.
+- Keep network lifecycle messages separate from transfer status. A temporary
+  activity pause must not disable Wi-Fi; start/stop resources with onStart/onStop.
+- Verify client transfer behavior with `make test-sync` and Java stream progress
+  with `make test-transfer`.
 
 ## Scanner Direction
 

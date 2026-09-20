@@ -203,6 +203,66 @@ paths:
                     scanned,9823
                     emitted,100
                     remaining,145
+  /api/v1/ui-status.txt:
+    get:
+      summary: Read the camera UI status
+      description: >
+        Returns the human-readable status line currently shown on the camera.
+        The server also accepts POST with a message=... form field to update it.
+      responses:
+        "200":
+          description: Current UI status.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    message,cursor ready matched=245 scanned=9823 emitted=100 remaining=145
+                    updated_at,1783300000000
+        "400":
+          description: Missing message when posting a UI update.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                missingMessage:
+                  value: missing message
+    post:
+      summary: Update the camera UI status
+      description: >
+        Updates the human-readable status line shown on the camera screen.
+        The request must include a message form field.
+      parameters:
+        - name: message
+          in: query
+          required: true
+          description: Human-readable status message.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated UI status.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                default:
+                  value: |
+                    message,download 10/245 year=2026 /storage/sdcard0/DCIM/100MSDCF/DSC01234.ARW
+                    updated_at,1783300000000
+        "400":
+          description: Missing message parameter.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                missingMessage:
+                  value: missing message
   /api/v1/file.txt:
     get:
       summary: Fetch metadata for one file
@@ -256,6 +316,18 @@ paths:
           description: Absolute file path on the camera.
           schema:
             type: string
+        - name: index
+          in: query
+          description: Optional one-based file number for the camera progress display.
+          schema:
+            type: integer
+            minimum: 1
+        - name: total
+          in: query
+          description: Optional total file count, used with index for display only.
+          schema:
+            type: integer
+            minimum: 1
       responses:
         "200":
           description: File bytes streamed with the camera-detected MIME type.
