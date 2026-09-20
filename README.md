@@ -306,8 +306,9 @@ database.
 * `close` cancels and releases the session.
 * `force=1` replaces a stale session.
 
-Do not add sorting or offset pagination to the MVP. The local server should
-own sync ordering, deduplication, and retry logic.
+Do not add sorting or offset pagination to the camera API. The local server
+sorts the completed inventory by `mtime` and path before batching, and owns
+deduplication and retry logic.
 
 ## Scanner Direction
 

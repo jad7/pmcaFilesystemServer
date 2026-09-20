@@ -321,6 +321,9 @@ def fetch_inventory(expected_count):
     if len(files) != expected_count:
         raise RuntimeError("incomplete inventory: expected %d files, received %d" % (
             expected_count, len(files)))
+    # The camera walks directories in filesystem order. Sort on the Linux host
+    # so batches are deterministic and chronological without extra camera RAM.
+    files.sort(key=lambda file: (file.mtime_ms, file.path))
     log_line("inventory: %d files, %.1f MiB" % (
         len(files), sum(file.size_bytes for file in files) / 1048576.0))
     return files

@@ -50,6 +50,20 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.downloaded_groups()["batches/one"][0].status, "downloaded")
             store.close()
 
+    def test_pending_files_are_sorted_by_mtime_then_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SyncStore(Path(directory) / "sync.sqlite3", "camera", 0)
+            store.start_inventory([
+                CameraFile("/z.JPG", 2000, 5, "image"),
+                CameraFile("/b.JPG", 1000, 5, "image"),
+                CameraFile("/a.JPG", 1000, 5, "image"),
+            ])
+            self.assertEqual(
+                [record.path for record in store.pending_files(20)],
+                ["/a.JPG", "/b.JPG", "/z.JPG"],
+            )
+            store.close()
+
     def test_legacy_baseline_reads_integer_and_iso_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"

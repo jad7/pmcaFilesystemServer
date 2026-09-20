@@ -169,7 +169,7 @@ class SyncStore(object):
             SELECT id, path, mtime_ms, size_bytes, kind, status, local_name, last_error
             FROM files
             WHERE status = 'pending'
-            ORDER BY (local_name IS NULL), id
+            ORDER BY (local_name IS NULL), mtime_ms, path, id
             LIMIT ?
             """,
             (int(limit),),

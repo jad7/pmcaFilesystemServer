@@ -41,6 +41,20 @@ class TransferTests(unittest.TestCase):
             sync.fetch_inventory(2)
         self.client.open_download.assert_not_called()
 
+    def test_inventory_is_sorted_by_mtime_then_path(self):
+        self.client.cursor_files.return_value = (
+            200,
+            "# has_more=0\n"
+            "/z.JPG\t2000\t5\timage\n"
+            "/b.JPG\t1000\t5\timage\n"
+            "/a.JPG\t1000\t5\timage\n",
+        )
+        files = sync.fetch_inventory(3)
+        self.assertEqual(
+            [(file.mtime_ms, file.path) for file in files],
+            [(1000, "/a.JPG"), (1000, "/b.JPG"), (2000, "/z.JPG")],
+        )
+
     def test_disconnect_retries_and_checks_size(self):
         payload = b"x" * (128 * 1024)
         self.client.open_download.side_effect = [BrokenResponse(payload), Response(payload)]

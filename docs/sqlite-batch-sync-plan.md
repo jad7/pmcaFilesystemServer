@@ -84,7 +84,9 @@ prevents manual `--once` and systemd from processing the same queue simultaneous
    maximum without moving backwards and clear the active inventory field.
 4. With no active inventory, fetch and validate all metadata pages using the
    existing client. In one transaction insert unseen file versions and store
-   the inventory maximum. Do not reset existing statuses. Close the cursor.
+   the inventory maximum. Sort the completed metadata on the Linux host by
+   `(mtime_ms, path)` before batching; do not add sorting work to the camera.
+   Do not reset existing statuses. Close the cursor.
    A failed/incomplete listing must not update SQLite.
 5. Download until 20 files are ready or the inventory ends. If the camera
    disconnects after 7 completed downloads, import those 7 first.
