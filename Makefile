@@ -12,6 +12,8 @@ CAMERA_BASE_URL ?=
 SYNC_DEST_DIR ?=
 SYNC_CONFIG ?= config/sony_a6000_sync.json
 SYNC_BUNDLE ?= build/sony-a6000-sync.pyz
+IMMICH_MONTH ?= 2026-09
+IMMICH_ORDERED_OUTPUT ?= build/immich-ordered-$(IMMICH_MONTH).tsv
 PROBE_ARGS ?=
 SYNC_ARGS ?=
 GRADLEW := bash ./gradlew
@@ -19,7 +21,7 @@ GRADLE_ENV := JAVA_HOME="$(JAVA8_HOME)" ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" A
 
 .PHONY: help doctor build build-no-tests test test-unit apk apk-debug apk-release apk-release-signed clean \
 	adb-connect adb-packages adb-install-debug adb-install-release-signed adb-uninstall \
-	adb-reinstall-debug adb-reinstall-release-signed camera-probe camera-sync sony-a6000-sync sony-a6000-sync-bundle
+	adb-reinstall-debug adb-reinstall-release-signed camera-probe camera-sync sony-a6000-sync sony-a6000-sync-bundle immich-ordered-files
 
 help:
 	@printf '%s\n' \
@@ -43,6 +45,7 @@ help:
 		'  make camera-sync     - Download files from camera into a local directory' \
 		'  make sony-a6000-sync - Sync camera media into Immich using the singleton cursor' \
 		'  make sony-a6000-sync-bundle - Build a single-file zipapp bundle' \
+		'  make immich-ordered-files - Export ordered Immich assets for a camera/month' \
 		'  make clean           - Clean build outputs' \
 		'  make doctor          - Print configured paths'
 
@@ -118,6 +121,10 @@ sony-a6000-sync-bundle:
 	@cp tools/sony_a6000_sync.py build/sony-a6000-sync-bundle/sony_a6000_sync.py
 	@printf '%s\n' 'from sony_a6000_sync import main' 'import sys' 'sys.exit(main())' > build/sony-a6000-sync-bundle/__main__.py
 	@$(PYTHON) -m zipapp build/sony-a6000-sync-bundle -o "$(SYNC_BUNDLE)"
+
+immich-ordered-files:
+	@[ -f "$(SYNC_CONFIG)" ] || { echo 'Set SYNC_CONFIG=config/sony_a6000_sync.json and copy the example config first'; exit 1; }
+	@$(PYTHON) tools/immich_ordered_files.py --config "$(SYNC_CONFIG)" --month "$(IMMICH_MONTH)" --output "$(IMMICH_ORDERED_OUTPUT)"
 
 clean:
 	@$(GRADLE_ENV) $(GRADLEW) clean

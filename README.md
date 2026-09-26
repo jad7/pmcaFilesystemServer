@@ -101,6 +101,20 @@ or `camera_strip_prefix`.
 The SQLite database is stored at `database_file`; if omitted, it is placed beside
 the legacy state file with a `.sqlite3` suffix.
 
+To create a read-only, chronologically ordered list of Immich assets from the
+Sony camera for September 2026:
+
+```bash
+make immich-ordered-files \
+  SYNC_CONFIG=config/sony_a6000_sync.json \
+  IMMICH_MONTH=2026-09 \
+  IMMICH_ORDERED_OUTPUT=build/immich-ordered-2026-09.tsv
+```
+
+The tool filters `make=SONY` and `model=ILCE-6000`, fetches all result pages,
+sorts locally by Immich `fileCreatedAt` with stable filename and asset-ID
+tie-breakers, and does not modify Immich or the sync database.
+
 If you want one file to copy to the Linux box, build the zipapp bundle:
 
 ```bash
